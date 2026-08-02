@@ -13,8 +13,8 @@ st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）公式ランキン�
 # ----------------------------------------------------
 async def fetch_alliance_ranking():
     client = PssApiClient()
-    # PSS公式サーバーからアライアンス（艦隊）のランキングを取得
-    alliances = await client.alliance_service.list_alliances_by_ranking(take=100)
+    # skip=0 (1位から), take=100 (100件取得) を指定
+    alliances = await client.alliance_service.list_alliances_by_ranking(0, 100)
     
     fleet_list = []
     for rank, alliance in enumerate(alliances, 1):
