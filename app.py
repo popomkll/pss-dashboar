@@ -14,46 +14,71 @@ st.caption("上位6艦隊の全所属メンバーデータを個別に取得し�
 # ----------------------------------------------------
 # データ取得処理
 # ----------------------------------------------------
-async def fetch_area_a_members():
+async def get_top6_alliances():
+    """上位6艦隊を取得"""
     client = PssApiClient()
-    
-    # 1. 上位6艦隊を pssapi で取得
     alliances = await client.alliance_service.list_alliances_by_ranking(0, 6)
+    return alliances
+
+def fetch_area_a_members():
+    # 1. pssapiで上位6艦隊を取得
+    alliances = asyncio.run(get_top6_alliances())
     
     all_members = []
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # サーバー拒否を避けるための詳細なヘッダー設定
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/xml, text/xml, */*'
+    }
+    
+    logs = []
     
     for rank, alliance in enumerate(alliances, 1):
-        # アライアンスIDの安全な取得
-        alliance_id = getattr(alliance, 'alliance_id', None) or getattr(alliance, 'id', None)
-        alliance_name = getattr(alliance, 'alliance_name', f"艦隊_{alliance_id}")
+        # アライアンスIDを取得
+        alliance_id = str(getattr(alliance, 'alliance_id', None) or getattr(alliance, 'id', ''))
+        alliance_name = str(getattr(alliance, 'alliance_name', f"艦隊_{alliance_id}"))
         
-        if not alliance_id:
+        if not alliance_id or alliance_id == 'None':
             continue
             
-        # 2. 艦隊に属するメンバー一覧を直接APIリクエスト
+        # 2. 艦隊ごとの所属ユーザー一覧を取得するエンドポイント
         url = f"https://api.pixelstarships.com/AllianceService/ListUsers?allianceId={alliance_id}"
+        
         try:
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
-                root = ET.fromstring(res.text)
-                # PSS APIのXMLレスポンスからユーザー情報をパース
-                users = root.findall('.//User') or root.findall('.//UserSubquery')
+                # XML要素のパース
+                root = ET.fromstring(res.content)
+                
+                # PSS APIのXML階層（Userタグを探す）
+                users = root.findall('.//User')
+                if not users:
+                    users = root.findall('.//UserSubquery')
                 
                 for user in users:
+                    # 属性の取得（大文字小文字の両方に対応）
+                    name = user.get('Name') or user.get('name') or '不明'
+                    score = user.get('AllianceScore') or user.get('allianceScore') or '0'
+                    trophy = user.get('Trophy') or user.get('trophy') or '0'
+                    membership = user.get('AllianceMembership') or user.get('allianceMembership') or '-'
+                    user_id = user.get('Id') or user.get('id') or '-'
+                    
                     all_members.append({
                         "艦隊順位": rank,
                         "艦隊名": alliance_name,
-                        "プレイヤー名": user.get('Name', '不明'),
-                        "スター数": int(user.get('AllianceScore', 0)),
-                        "トロフィー": int(user.get('Trophy', 0)),
-                        "役職": user.get('AllianceMembership', '-'),
-                        "プレイヤーID": user.get('Id', '-')
+                        "プレイヤー名": name,
+                        "スター数": int(score) if str(score).isdigit() else 0,
+                        "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
+                        "役職": membership,
+                        "プレイヤーID": user_id
                     })
+                logs.append(f"✅ {alliance_name}: {len(users)}名のデータ取得完了")
+            else:
+                logs.append(f"❌ {alliance_name}: HTTPエラー {res.status_code}")
         except Exception as err:
-            st.warning(f"「{alliance_name}」のメンバー取得でエラーが発生しました: {err}")
+            logs.append(f"❌ {alliance_name}: 通信エラー ({err})")
             
-    return pd.DataFrame(all_members)
+    return pd.DataFrame(all_members), logs
 
 # ----------------------------------------------------
 # 画面操作＆データ読み込み
@@ -63,20 +88,30 @@ st.subheader("🔄 データ取得操作")
 
 if "area_a_df" not in st.session_state:
     st.session_state.area_a_df = pd.DataFrame()
+if "fetch_logs" not in st.session_state:
+    st.session_state.fetch_logs = []
 
 col1, col2 = st.columns([1, 3])
 with col1:
     if st.button("🚀 エリアA（上位6艦隊）の最新データを取得", type="primary"):
-        with st.spinner("上位6艦隊の全メンバーデータを取得中...（約5〜10秒）"):
+        with st.spinner("上位6艦隊の全メンバーデータを取得中...（約5秒）"):
             try:
-                df_result = asyncio.run(fetch_area_a_members())
+                df_result, logs = fetch_area_a_members()
                 st.session_state.area_a_df = df_result
+                st.session_state.fetch_logs = logs
+                
                 if not df_result.empty:
                     st.success("✅ データ取得が完了しました！")
                 else:
-                    st.error("データの取得結果が空でした。再度お試しください。")
+                    st.error("データの取得結果が空でした。通信ログをご確認ください。")
             except Exception as e:
-                st.error(f"データ取得中にエラーが発生しました: {e}")
+                st.error(f"実行中にエラーが発生しました: {e}")
+
+# 通信ログの表示（折りたたみ）
+if st.session_state.fetch_logs:
+    with st.expander("🔍 通信・取得ログを確認"):
+        for log in st.session_state.fetch_logs:
+            st.write(log)
 
 # ----------------------------------------------------
 # データ表示エリア
