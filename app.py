@@ -13,22 +13,22 @@ st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）公式ランキン�
 # ----------------------------------------------------
 async def fetch_alliance_ranking():
     client = PssApiClient()
-    # PSS公式サーバーからアライアンス（艦隊）トップ100を取得
-    alliances = await client.alliance_service.list_all_alliances_by_ranking(take=100)
+    # PSS公式サーバーからアライアンス（艦隊）のランキングを取得
+    alliances = await client.alliance_service.list_alliances_by_ranking(take=100)
     
     fleet_list = []
     for rank, alliance in enumerate(alliances, 1):
         fleet_list.append({
             "順位": rank,
-            "艦隊名": alliance.alliance_name,
-            "スター数": alliance.score,
-            "トロフィー": alliance.trophy,
-            "メンバー数": alliance.number_of_members,
-            "アライアンスID": alliance.alliance_id
+            "艦隊名": getattr(alliance, 'alliance_name', '不明'),
+            "スター数": getattr(alliance, 'score', 0),
+            "トロフィー": getattr(alliance, 'trophy', 0),
+            "メンバー数": getattr(alliance, 'number_of_members', 0),
+            "アライアンスID": getattr(alliance, 'alliance_id', '-')
         })
     return pd.DataFrame(fleet_list)
 
-@st.cache_data(ttl=600)  # 10分ごとにキャッシュを自動更新
+@st.cache_data(ttl=600)  # 10分ごとに自動更新
 def get_official_data():
     return asyncio.run(fetch_alliance_ranking())
 
