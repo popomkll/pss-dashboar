@@ -26,34 +26,54 @@ if "pvp_df" not in st.session_state:
 # API通信関数
 # ----------------------------------------------------
 def login_with_email(email, password):
-    """メールアドレスとパスワードで正規トークンを取得（GET通信）"""
-    url = "https://api.pixelstarships.com/UserService/EmailPasswordLogin"
+    """複数のエンドポイント候補を順に試して正規トークンを取得"""
+    # 試行対象のログイン用エンドポイント一覧
+    endpoints = [
+        "https://api.pixelstarships.com/UserService/UserEmailPasswordLogin",
+        "https://api.pixelstarships.com/UserService/EmailPasswordLogin",
+        "https://api.pixelstarships.com/UserService/UserEmailPasswordAuthorize",
+        "https://api.pixelstarships.com/UserService/EmailPasswordAuthorize",
+    ]
+
     params = {
         "email": email,
         "password": password,
         "deviceType": "DeviceTypeAndroid",
     }
-    try:
-        # PSSのログインAPIは GET リクエストでパラメータを送信
-        res = requests.get(url, params=params, headers=HEADERS, timeout=10)
 
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
+    last_error = ""
 
-            # XML内から UserLogin タグを探す
-            user_login = root.find(".//UserLogin")
-            if user_login is not None:
-                token = user_login.attrib.get("accessToken")
+    for url in endpoints:
+        api_name = url.split("/")[-1]
+        try:
+            res = requests.get(url, params=params, headers=HEADERS, timeout=10)
+
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+
+                # xml内から accessToken を探索
+                token = None
+                for elem in root.iter():
+                    token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
+                    if token:
+                        break
+
                 if token:
-                    return token, "✅ ログイン成功！"
+                    return token, f"✅ ログイン成功！ ({api_name})"
 
-            # ログイン失敗時（パスワード違い等）のメッセージ取得
-            error_msg = root.attrib.get("errorMessage") or "認証失敗: アカウント情報をご確認ください"
-            return None, f"❌ {error_msg}"
-        else:
-            return None, f"❌ HTTPエラー: {res.status_code}"
-    except Exception as e:
-        return None, f"❌ 通信エラー: {e}"
+                # 認証失敗（パスワード違い等）のメッセージ取得
+                error_msg = (
+                    root.attrib.get("errorMessage")
+                    or root.attrib.get("error")
+                    or "認証失敗: メールアドレスまたはパスワードを確認してください"
+                )
+                return None, f"❌ {error_msg} ({api_name})"
+            else:
+                last_error = f"HTTP {res.status_code} ({api_name})"
+        except Exception as e:
+            last_error = f"通信例外: {e} ({api_name})"
+
+    return None, f"❌ 接続エラー: {last_error}"
 
 
 def fetch_area_a_members(token):
