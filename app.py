@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import io
 import requests
-import re
 import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー分析", layout="wide")
@@ -10,52 +9,85 @@ st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤ�
 st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）トーナメント エリアA 分析")
 st.caption("上位6艦隊の全所属メンバーデータを個別に取得して表示します。")
 
-# ----------------------------------------------------
-# PSS API 通信 ＆ 強力文字列解析ロジック
-# ----------------------------------------------------
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
-def get_access_token():
-    url = "https://api.pixelstarships.com/DeviceService/DeviceLogin11?deviceType=DeviceTypeAndroid"
-    try:
-        res = requests.post(url, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            match = re.search(r'accessToken="([^"]+)"', res.text) or re.search(r'token="([^"]+)"', res.text)
-            if match:
-                return match.group(1)
-    except Exception:
-        pass
-    return None
-
-def fetch_area_a_members():
-    token = get_access_token()
+def fetch_area_a_with_debug():
+    logs = []
     
+    # ----------------------------------------------------
+    # STEP 1: アクセストークン取得
+    # ----------------------------------------------------
+    logs.append("--- 🔑 STEP 1: アクセストークン取得 ---")
+    token = None
+    token_url = "https://api.pixelstarships.com/DeviceService/DeviceLogin11?deviceType=DeviceTypeAndroid"
+    
+    try:
+        res = requests.post(token_url, headers=HEADERS, timeout=10)
+        logs.append(f"トークン要求 HTTPステータス: {res.status_code}")
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            # 全要素の属性からaccessTokenを探す
+            for elem in root.iter():
+                token = elem.attrib.get('accessToken') or elem.attrib.get('token')
+                if token:
+                    break
+            if token:
+                logs.append(f"✅ トークン取得成功: {token[:10]}...")
+            else:
+                logs.append("⚠️ トークンが見つかりませんでした（匿名アクセスを試みます）")
+    except Exception as e:
+        logs.append(f"❌ トークン取得例外: {e}")
+
+    # ----------------------------------------------------
+    # STEP 2: 上位6艦隊の取得
+    # ----------------------------------------------------
+    logs.append("\n--- 🏆 STEP 2: 上位6艦隊データ取得 ---")
     alliances_url = "https://api.pixelstarships.com/AllianceService/ListAlliancesByRanking?take=6"
     if token:
         alliances_url += f"&accessToken={token}"
         
-    res = requests.get(alliances_url, headers=HEADERS, timeout=10)
-    if res.status_code != 200:
-        return pd.DataFrame(), [f"艦隊ランキング取得失敗: HTTP {res.status_code}"]
+    try:
+        a_res = requests.get(alliances_url, headers=HEADERS, timeout=10)
+        logs.append(f"ランキング取得 HTTPステータス: {a_res.status_code}")
         
-    # 正規表現で Alliance タグ情報を直接抽出
-    alliance_matches = re.findall(r'<Alliance[^>]+>', res.text)
-    
-    all_members = []
-    logs = []
-    
-    for rank, a_str in enumerate(alliance_matches[:6], 1):
-        a_id_m = re.search(r'AllianceId="([^"]+)"', a_str, re.I) or re.search(r'Id="([^"]+)"', a_str, re.I)
-        a_name_m = re.search(r'AllianceName="([^"]+)"', a_str, re.I) or re.search(r'Name="([^"]+)"', a_str, re.I)
-        
-        alliance_id = a_id_m.group(1) if a_id_m else None
-        alliance_name = a_name_m.group(1) if a_name_m else f"艦隊_{alliance_id}"
-        
-        if not alliance_id:
-            continue
+        if a_res.status_code != 200:
+            return pd.DataFrame(), logs
             
+        a_root = ET.fromstring(a_res.content)
+        # XML内のすべての要素からアライアンス要素（AllianceIdを持っているもの）を厳密抽出
+        alliance_elems = [
+            elem for elem in a_root.iter() 
+            if 'allianceid' in {k.lower(): v for k, v in elem.attrib.items()}
+        ]
+        
+        # 重複IDの除外
+        unique_alliances = []
+        seen_ids = set()
+        for elem in alliance_elems:
+            attrs = {k.lower(): v for k, v in elem.attrib.items()}
+            a_id = attrs.get('allianceid')
+            if a_id and a_id not in seen_ids:
+                seen_ids.add(a_id)
+                a_name = elem.attrib.get('AllianceName') or attrs.get('alliancename') or f"艦隊_{a_id}"
+                unique_alliances.append((a_id, a_name))
+                
+        logs.append(f"✅ 取得された上位艦隊数: {len(unique_alliances)}件")
+        for idx, (a_id, a_name) in enumerate(unique_alliances[:6], 1):
+            logs.append(f"  └ 順位 {idx}: {a_name} (ID: {a_id})")
+            
+    except Exception as e:
+        logs.append(f"❌ ランキング取得例外: {e}")
+        return pd.DataFrame(), logs
+
+    # ----------------------------------------------------
+    # STEP 3: 各艦隊のメンバー情報取得 ＆ タグ分析
+    # ----------------------------------------------------
+    logs.append("\n--- 👥 STEP 3: メンバーデータ取得・解析 ---")
+    all_members = []
+    
+    for rank, (alliance_id, alliance_name) in enumerate(unique_alliances[:6], 1):
         users_url = f"https://api.pixelstarships.com/AllianceService/ListUsers?allianceId={alliance_id}"
         if token:
             users_url += f"&accessToken={token}"
@@ -63,29 +95,34 @@ def fetch_area_a_members():
         try:
             u_res = requests.get(users_url, headers=HEADERS, timeout=10)
             if u_res.status_code == 200:
-                # User情報を正規表現で一括取得（タグ名不問）
-                user_matches = re.findall(r'<[a-zA-Z0-9]+[^>]+Name="[^"]+"[^>]*>', u_res.text)
-                if not user_matches:
-                    # 小文字の場合の検索パターン
-                    user_matches = re.findall(r'<[a-zA-Z0-9]+[^>]+name="[^"]+"[^>]*>', u_res.text)
+                u_root = ET.fromstring(u_res.content)
                 
+                # XML内の全要素のうち、'name' 属性を持つものを検出
+                user_elems = [
+                    elem for elem in u_root.iter()
+                    if 'name' in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
+                ]
+                
+                # 最初に見つかったユーザー要素のタグ名と属性一覧をログに記録（デバッグ用）
+                sample_info = ""
+                if user_elems:
+                    sample_tag = user_elems[0].tag
+                    sample_attrs = list(user_elems[0].attrib.keys())
+                    sample_info = f" [検出タグ: <{sample_tag}>, 属性例: {sample_attrs[:4]}]"
+                    
                 count = 0
-                for u_str in user_matches:
-                    # アライアンス自体のタグを誤検知した場合はスキップ
-                    if '<Alliance' in u_str:
+                for u_elem in user_elems:
+                    attrs = {k.lower(): v for k, v in u_elem.attrib.items()}
+                    
+                    # 艦隊自体の要素が紛れ込んでいる場合は排除
+                    if 'alliancename' in attrs:
                         continue
                         
-                    name_m = re.search(r'Name="([^"]+)"', u_str, re.I)
-                    score_m = re.search(r'AllianceScore="([^"]+)"', u_str, re.I) or re.search(r'Score="([^"]+)"', u_str, re.I)
-                    trophy_m = re.search(r'Trophy="([^"]+)"', u_str, re.I)
-                    membership_m = re.search(r'AllianceMembership="([^"]+)"', u_str, re.I) or re.search(r'Role="([^"]+)"', u_str, re.I)
-                    id_m = re.search(r'Id="([^"]+)"', u_str, re.I) or re.search(r'UserId="([^"]+)"', u_str, re.I)
-                    
-                    name = name_m.group(1) if name_m else "不明"
-                    score = score_m.group(1) if score_m else "0"
-                    trophy = trophy_m.group(1) if trophy_m else "0"
-                    membership = membership_m.group(1) if membership_m else "-"
-                    user_id = id_m.group(1) if id_m else "-"
+                    name = u_elem.attrib.get('Name') or attrs.get('name') or '不明'
+                    score = attrs.get('alliancescore') or attrs.get('score') or '0'
+                    trophy = attrs.get('trophy') or '0'
+                    membership = attrs.get('alliancemembership') or attrs.get('role') or '-'
+                    user_id = attrs.get('id') or attrs.get('userid') or '-'
                     
                     all_members.append({
                         "艦隊順位": rank,
@@ -98,11 +135,11 @@ def fetch_area_a_members():
                     })
                     count += 1
                     
-                logs.append(f"✅ {alliance_name}: {count}名 取得成功")
+                logs.append(f"✅ 【{alliance_name}】: {count}名 取得完了{sample_info}")
             else:
-                logs.append(f"❌ {alliance_name}: HTTP {u_res.status_code}")
+                logs.append(f"❌ 【{alliance_name}】: HTTPエラー {u_res.status_code}")
         except Exception as err:
-            logs.append(f"❌ {alliance_name}: {err}")
+            logs.append(f"❌ 【{alliance_name}】: 解析例外 ({err})")
             
     return pd.DataFrame(all_members), logs
 
@@ -120,24 +157,23 @@ if "fetch_logs" not in st.session_state:
 col1, col2 = st.columns([1, 3])
 with col1:
     if st.button("🚀 エリアA（上位6艦隊）の最新データを取得", type="primary"):
-        with st.spinner("PSS公式サーバーからデータを解析・抽出中...（約3〜5秒）"):
+        with st.spinner("STEP 1〜3 を順次実行中..."):
             try:
-                df_result, logs = fetch_area_a_members()
+                df_result, logs = fetch_area_a_with_debug()
                 st.session_state.area_a_df = df_result
                 st.session_state.fetch_logs = logs
                 
                 if not df_result.empty:
-                    st.success("✅ データ取得が完了しました！")
+                    st.success("✅ 全ステップ完了！データをロードしました。")
                 else:
-                    st.error("データの取得結果が空でした。詳細ログをご確認ください。")
+                    st.error("データの取得結果が空でした。以下の「🔍 ステップ別デバッグログ」をご確認ください。")
             except Exception as e:
                 st.error(f"実行中にエラーが発生しました: {e}")
 
-# 通信ログの表示
+# ステップ別デバッグログの表示
 if st.session_state.fetch_logs:
-    with st.expander("🔍 詳細ログを確認"):
-        for log in st.session_state.fetch_logs:
-            st.write(log)
+    with st.expander("🔍 ステップ別デバッグログを確認する", expanded=True):
+        st.code("\n".join(st.session_state.fetch_logs), language="text")
 
 # ----------------------------------------------------
 # データ表示エリア
@@ -148,7 +184,6 @@ if not df.empty:
     st.markdown("---")
     st.subheader("📊 エリアA メンバーデータ一覧")
     
-    # 艦隊ごとの絞り込み
     fleet_names = list(df['艦隊名'].unique())
     selected_fleet = st.selectbox("📌 艦隊で絞り込む:", ["すべての艦隊 (全メンバー)"] + fleet_names)
     
@@ -159,13 +194,11 @@ if not df.empty:
         
     st.info(f"表示中: **{len(display_df)} 名** | 合計スター数: **{display_df['スター数'].sum():,}**")
     
-    # テーブル表示
     st.dataframe(
         display_df.sort_values(by=["艦隊順位", "スター数"], ascending=[True, False]),
         use_container_width=True
     )
     
-    # 検索機能
     st.markdown("---")
     search_name = st.text_input("🔍 プレイヤー名で直接検索:")
     if search_name:
@@ -175,7 +208,6 @@ if not df.empty:
         else:
             st.warning("指定した名前のプレイヤーは見つかりませんでした。")
 
-    # Excelダウンロード
     st.markdown("---")
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
