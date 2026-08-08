@@ -2,9 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import requests
-import asyncio
 import xml.etree.ElementTree as ET
-from pssapi import PssApiClient
 
 st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー分析", layout="wide")
 
@@ -15,40 +13,46 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
-async def get_pss_access_token():
-    """pssapiの公式クライアントを使用して正規のアクセストークンを取得"""
-    client = PssApiClient()
-    # 公式推奨のデバイスログイン11を実行
-    login_result = await client.user_service.device_login_11(
-        checksum="",
-        device_type="DeviceTypeAndroid",
-        language_key="en",
-        advertising_key="",
-        client_date_time=""
-    )
-    # レスポンスからアクセストークンを抽出
-    if hasattr(login_result, 'access_token') and login_result.access_token:
-        return login_result.access_token
-    elif hasattr(login_result, 'token') and login_result.token:
-        return login_result.token
-    return None
+def get_guest_access_token():
+    """PSS公式APIにゲストログインを行い、正式なaccessTokenを取得する"""
+    url = "https://api.pixelstarships.com/UserService/DeviceLogin11"
+    params = {
+        'deviceType': 'DeviceTypeAndroid',
+        'advertisingKey': '',
+        'checksum': '',
+        'clientDateTime': '',
+        'languageKey': 'en'
+    }
+    
+    try:
+        # PSSサーバーに対して正式なDeviceLoginを実行
+        res = requests.post(url, params=params, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            # レスポンス内の UserLogin / User 要素から accessToken 属性を全探索
+            for elem in root.iter():
+                token = elem.attrib.get('accessToken') or elem.attrib.get('AccessToken')
+                if token:
+                    return token, "成功"
+            return None, "レスポンスXML内にaccessTokenが見つかりません"
+        else:
+            return None, f"HTTPエラー: {res.status_code}"
+    except Exception as e:
+        return None, f"通信例外: {e}"
 
 def fetch_area_a_with_debug():
     logs = []
     
     # ----------------------------------------------------
-    # STEP 1: 公式クライアントによるトークン取得
+    # STEP 1: アクセストークン取得
     # ----------------------------------------------------
     logs.append("--- 🔑 STEP 1: アクセストークン取得 ---")
-    token = None
-    try:
-        token = asyncio.run(get_pss_access_token())
-        if token:
-            logs.append(f"✅ トークン発行成功: {token[:12]}...")
-        else:
-            logs.append("❌ トークン発行失敗: レスポンス内にトークンがありません")
-    except Exception as e:
-        logs.append(f"❌ トークン発行例外: {e}")
+    token, status_msg = get_guest_access_token()
+    
+    if token:
+        logs.append(f"✅ トークン発行成功: {token[:12]}...")
+    else:
+        logs.append(f"❌ トークン発行失敗: {status_msg}")
 
     # ----------------------------------------------------
     # STEP 2: 上位6艦隊の取得
@@ -106,7 +110,7 @@ def fetch_area_a_with_debug():
             if u_res.status_code == 200:
                 u_root = ET.fromstring(u_res.content)
                 
-                # ユーザー要素を抽出
+                # User要素の抽出
                 user_elems = [
                     elem for elem in u_root.iter()
                     if 'name' in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
