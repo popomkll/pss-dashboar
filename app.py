@@ -9,7 +9,10 @@ st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤ�
 st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）エリアA & 対戦分析")
 st.caption("PSS公式APIと連携して、メンバーデータおよびPVP対戦ログを取得・分析します。")
 
-HEADERS = {"User-Agent": "PixelStarships/1.0"}
+HEADERS = {
+    "User-Agent": "PixelStarships/1.0",
+    "Accept": "*/*"
+}
 
 # ----------------------------------------------------
 # セッション状態の初期化
@@ -26,94 +29,76 @@ if "pvp_df" not in st.session_state:
 # API通信関数
 # ----------------------------------------------------
 def login_with_email(email, password):
-    """複数バージョンのDeviceLoginおよびUserEmailPasswordLoginを自動試行してトークン取得"""
+    """標準公式フローによるログイン認証"""
+    
+    # 1. DeviceLogin で初期トークン（ゲストトークン）を取得
+    # 必須パラメータ: deviceType, isTest
+    dev_url = "https://api.pixelstarships.com/UserService/DeviceLogin"
+    dev_params = {
+        "deviceType": "DeviceTypeAndroid",
+        "isTest": "false"
+    }
+    
+    try:
+        # POST送信
+        dev_res = requests.post(dev_url, params=dev_params, headers=HEADERS, timeout=10)
+        
+        # 404/405 等が出た場合は GET でフォールバック
+        if dev_res.status_code != 200:
+            dev_res = requests.get(dev_url, params=dev_params, headers=HEADERS, timeout=10)
 
-    # 1. 端末初期化用エンドポイント候補（GET送信）
-    device_endpoints = [
-        "https://api.pixelstarships.com/UserService/DeviceLogin",
-        "https://api.pixelstarships.com/UserService/DeviceLogin11",
-        "https://api.pixelstarships.com/UserService/DeviceLogin12",
-        "https://api.pixelstarships.com/UserService/DeviceLogin13",
-        "https://api.pixelstarships.com/UserService/DeviceLogin14",
-        "https://api.pixelstarships.com/UserService/DeviceLogin15",
-    ]
+        if dev_res.status_code != 200:
+            return None, f"❌ 初期化エラー (HTTP {dev_res.status_code})"
 
-    temp_token = None
-    dev_err = ""
+        dev_root = ET.fromstring(dev_res.content)
+        user_login = dev_root.find(".//UserLogin")
+        if user_login is None:
+            return None, "❌ 初期化応答の解析に失敗しました"
 
-    for dev_url in device_endpoints:
-        try:
-            # PSSのDeviceLoginは GET リクエストで処理
-            res = requests.get(
-                dev_url,
-                params={"deviceType": "DeviceTypeAndroid"},
-                headers=HEADERS,
-                timeout=10,
-            )
-            if res.status_code == 200:
-                root = ET.fromstring(res.content)
-                user_login = root.find(".//UserLogin")
-                if user_login is not None:
-                    temp_token = user_login.attrib.get("accessToken")
-                    if temp_token:
-                        break
-            else:
-                dev_err = f"HTTP {res.status_code}"
-        except Exception as e:
-            dev_err = str(e)
+        temp_token = user_login.attrib.get("accessToken")
+        if not temp_token:
+            return None, "❌ アクセストークンが見つかりません"
 
-    if not temp_token:
-        return None, f"❌ 初期化失敗: {dev_err or 'トークン取得不能'}"
-
-    # 2. メールアドレス・パスワード認証用エンドポイント候補
-    auth_endpoints = [
-        "https://api.pixelstarships.com/UserService/UserEmailPasswordLogin",
-        "https://api.pixelstarships.com/UserService/UserEmailPasswordAuthorize",
-        "https://api.pixelstarships.com/UserService/EmailPasswordLogin",
-    ]
-
-    auth_err = ""
-
-    for auth_url in auth_endpoints:
-        params = {
+        # 2. 得られた初期トークンを使って UserEmailPasswordLogin で本ログイン
+        auth_url = "https://api.pixelstarships.com/UserService/UserEmailPasswordLogin"
+        auth_params = {
             "email": email,
             "password": password,
-            "accessToken": temp_token,
+            "accessToken": temp_token
         }
-        try:
-            # GET リクエストで送信
-            res = requests.get(auth_url, params=params, headers=HEADERS, timeout=10)
 
-            # GETで404の場合はPOSTも試行
-            if res.status_code == 404:
-                res = requests.post(auth_url, data=params, headers=HEADERS, timeout=10)
+        auth_res = requests.post(auth_url, params=auth_params, headers=HEADERS, timeout=10)
+        
+        if auth_res.status_code != 200:
+            auth_res = requests.get(auth_url, params=auth_params, headers=HEADERS, timeout=10)
 
-            if res.status_code == 200:
-                root = ET.fromstring(res.content)
+        if auth_res.status_code == 200:
+            auth_root = ET.fromstring(auth_res.content)
 
-                # XML全体から accessToken を全検索
-                final_token = None
-                for elem in root.iter():
+            # 認証成功時のUserLoginタグから正規トークンを抽出
+            final_user_login = auth_root.find(".//UserLogin")
+            final_token = None
+            if final_user_login is not None:
+                final_token = final_user_login.attrib.get("accessToken")
+
+            if not final_token:
+                # 属性全体から全検索
+                for elem in auth_root.iter():
                     final_token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
                     if final_token:
                         break
 
-                if final_token:
-                    return final_token, "✅ ログイン成功！"
+            if final_token:
+                return final_token, "✅ ログイン成功！"
 
-                # エラーメッセージの抽出
-                error_msg = (
-                    root.attrib.get("errorMessage")
-                    or root.attrib.get("error")
-                    or "認証失敗: メールアドレスまたはパスワードを確認してください"
-                )
-                return None, f"❌ {error_msg}"
-            else:
-                auth_err = f"HTTP {res.status_code}"
-        except Exception as e:
-            auth_err = str(e)
+            # エラーメッセージ（パスワード間違い等）
+            error_msg = auth_root.attrib.get("errorMessage") or "メールアドレスまたはパスワードが正しくありません"
+            return None, f"❌ {error_msg}"
+        else:
+            return None, f"❌ 本認証エラー (HTTP {auth_res.status_code})"
 
-    return None, f"❌ 認証通信エラー: {auth_err}"
+    except Exception as e:
+        return None, f"❌ 通信例外発生: {e}"
 
 
 def fetch_area_a_members(token):
@@ -146,8 +131,7 @@ def fetch_area_a_members(token):
             if u_res.status_code == 200:
                 u_root = ET.fromstring(u_res.content)
                 user_elems = [
-                    elem
-                    for elem in u_root.iter()
+                    elem for elem in u_root.iter()
                     if "name" in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
                 ]
 
@@ -163,17 +147,15 @@ def fetch_area_a_members(token):
                     membership = attrs.get("alliancemembership") or attrs.get("role") or "-"
                     user_id = attrs.get("id") or attrs.get("userid") or "-"
 
-                    all_members.append(
-                        {
-                            "艦隊順位": rank,
-                            "艦隊名": alliance_name,
-                            "プレイヤー名": name,
-                            "スター数": int(score) if str(score).isdigit() else 0,
-                            "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
-                            "役職": membership,
-                            "プレイヤーID": user_id,
-                        }
-                    )
+                    all_members.append({
+                        "艦隊順位": rank,
+                        "艦隊名": alliance_name,
+                        "プレイヤー名": name,
+                        "スター数": int(score) if str(score).isdigit() else 0,
+                        "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
+                        "役職": membership,
+                        "プレイヤーID": user_id
+                    })
                     count += 1
                 logs.append(f"✅ 【{alliance_name}】: {count}名 取得完了")
             else:
@@ -193,15 +175,13 @@ def fetch_pvp_logs(token):
             root = ET.fromstring(res.content)
             pvp_list = []
             for log in root.findall(".//PvpLog"):
-                pvp_list.append(
-                    {
-                        "対戦日時": log.attrib.get("Date", "")[:19].replace("T", " "),
-                        "攻撃者": log.attrib.get("AttackerName", "不明"),
-                        "防衛者": log.attrib.get("DefenderName", "不明"),
-                        "獲得スター": log.attrib.get("StarCount", "0"),
-                        "結果タイプ": log.attrib.get("DisasterType", "-"),
-                    }
-                )
+                pvp_list.append({
+                    "対戦日時": log.attrib.get("Date", "")[:19].replace("T", " "),
+                    "攻撃者": log.attrib.get("AttackerName", "不明"),
+                    "防衛者": log.attrib.get("DefenderName", "不明"),
+                    "獲得スター": log.attrib.get("StarCount", "0"),
+                    "結果タイプ": log.attrib.get("DisasterType", "-")
+                })
             return pd.DataFrame(pvp_list), f"✅ PVPログ {len(pvp_list)} 件取得完了"
         else:
             return pd.DataFrame(), f"❌ PVPログ取得エラー: HTTP {res.status_code}"
@@ -266,7 +246,7 @@ with tab1:
 
         st.dataframe(
             display_df.sort_values(by=["艦隊順位", "スター数"], ascending=[True, False]),
-            use_container_width=True,
+            use_container_width=True
         )
 
         # Excelダウンロード
@@ -277,7 +257,7 @@ with tab1:
             label="📥 全メンバーデータをExcelでダウンロード",
             data=output.getvalue(),
             file_name="PSS_AreaA_Members.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
 # --- TAB 2: PVP対戦ログ ---
