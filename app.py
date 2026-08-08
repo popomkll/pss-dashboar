@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import io
 import requests
+import asyncio
 import xml.etree.ElementTree as ET
+from pssapi import PssApiClient
 
 st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー分析", layout="wide")
 
@@ -13,32 +15,35 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
+async def get_pss_token_async():
+    """pssapi公式クライアントを使用して正しいアクセストークンを発行"""
+    client = PssApiClient()
+    # デバイスログインを実行してログインオブジェクトを取得
+    login_info = await client.device_service.device_login_11(
+        checksum="",
+        device_type="DeviceTypeAndroid",
+        language_key="en",
+        advertising_key="",
+        client_date_time=""
+    )
+    return getattr(login_info, 'access_token', None) or getattr(login_info, 'token', None)
+
 def fetch_area_a_with_debug():
     logs = []
     
     # ----------------------------------------------------
-    # STEP 1: アクセストークン取得
+    # STEP 1: 正しい認証フローによるアクセストークン取得
     # ----------------------------------------------------
     logs.append("--- 🔑 STEP 1: アクセストークン取得 ---")
     token = None
-    token_url = "https://api.pixelstarships.com/DeviceService/DeviceLogin11?deviceType=DeviceTypeAndroid"
-    
     try:
-        res = requests.post(token_url, headers=HEADERS, timeout=10)
-        logs.append(f"トークン要求 HTTPステータス: {res.status_code}")
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            # 全要素の属性からaccessTokenを探す
-            for elem in root.iter():
-                token = elem.attrib.get('accessToken') or elem.attrib.get('token')
-                if token:
-                    break
-            if token:
-                logs.append(f"✅ トークン取得成功: {token[:10]}...")
-            else:
-                logs.append("⚠️ トークンが見つかりませんでした（匿名アクセスを試みます）")
+        token = asyncio.run(get_pss_token_async())
+        if token:
+            logs.append(f"✅ トークン発行成功: {token[:12]}...")
+        else:
+            logs.append("❌ トークン発行失敗: レスポンスが空です")
     except Exception as e:
-        logs.append(f"❌ トークン取得例外: {e}")
+        logs.append(f"❌ トークン発行例外: {e}")
 
     # ----------------------------------------------------
     # STEP 2: 上位6艦隊の取得
@@ -56,13 +61,12 @@ def fetch_area_a_with_debug():
             return pd.DataFrame(), logs
             
         a_root = ET.fromstring(a_res.content)
-        # XML内のすべての要素からアライアンス要素（AllianceIdを持っているもの）を厳密抽出
+        
         alliance_elems = [
             elem for elem in a_root.iter() 
             if 'allianceid' in {k.lower(): v for k, v in elem.attrib.items()}
         ]
         
-        # 重複IDの除外
         unique_alliances = []
         seen_ids = set()
         for elem in alliance_elems:
@@ -82,7 +86,7 @@ def fetch_area_a_with_debug():
         return pd.DataFrame(), logs
 
     # ----------------------------------------------------
-    # STEP 3: 各艦隊のメンバー情報取得 ＆ タグ分析
+    # STEP 3: 各艦隊のメンバー情報取得
     # ----------------------------------------------------
     logs.append("\n--- 👥 STEP 3: メンバーデータ取得・解析 ---")
     all_members = []
@@ -97,24 +101,16 @@ def fetch_area_a_with_debug():
             if u_res.status_code == 200:
                 u_root = ET.fromstring(u_res.content)
                 
-                # XML内の全要素のうち、'name' 属性を持つものを検出
+                # 属性に 'name' を持つ全ユーザー要素を検索
                 user_elems = [
                     elem for elem in u_root.iter()
                     if 'name' in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
                 ]
                 
-                # 最初に見つかったユーザー要素のタグ名と属性一覧をログに記録（デバッグ用）
-                sample_info = ""
-                if user_elems:
-                    sample_tag = user_elems[0].tag
-                    sample_attrs = list(user_elems[0].attrib.keys())
-                    sample_info = f" [検出タグ: <{sample_tag}>, 属性例: {sample_attrs[:4]}]"
-                    
                 count = 0
                 for u_elem in user_elems:
                     attrs = {k.lower(): v for k, v in u_elem.attrib.items()}
                     
-                    # 艦隊自体の要素が紛れ込んでいる場合は排除
                     if 'alliancename' in attrs:
                         continue
                         
@@ -135,7 +131,7 @@ def fetch_area_a_with_debug():
                     })
                     count += 1
                     
-                logs.append(f"✅ 【{alliance_name}】: {count}名 取得完了{sample_info}")
+                logs.append(f"✅ 【{alliance_name}】: {count}名 取得完了")
             else:
                 logs.append(f"❌ 【{alliance_name}】: HTTPエラー {u_res.status_code}")
         except Exception as err:
@@ -166,11 +162,11 @@ with col1:
                 if not df_result.empty:
                     st.success("✅ 全ステップ完了！データをロードしました。")
                 else:
-                    st.error("データの取得結果が空でした。以下の「🔍 ステップ別デバッグログ」をご確認ください。")
+                    st.error("データの取得結果が空でした。以下のデバッグログをご確認ください。")
             except Exception as e:
                 st.error(f"実行中にエラーが発生しました: {e}")
 
-# ステップ別デバッグログの表示
+# デバッグログの表示
 if st.session_state.fetch_logs:
     with st.expander("🔍 ステップ別デバッグログを確認する", expanded=True):
         st.code("\n".join(st.session_state.fetch_logs), language="text")
