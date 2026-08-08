@@ -1,4 +1,5 @@
 import io
+import uuid
 import xml.etree.ElementTree as ET
 import pandas as pd
 import requests
@@ -29,37 +30,42 @@ if "pvp_df" not in st.session_state:
 # API通信関数
 # ----------------------------------------------------
 def login_with_email(email, password):
-    """標準公式フローによるログイン認証"""
+    """端末UUID付きで DeviceLogin を実行後、UserEmailPasswordLogin でトークン取得"""
     
-    # 1. DeviceLogin で初期トークン（ゲストトークン）を取得
-    # 必須パラメータ: deviceType, isTest
+    # ダミーのデバイス識別IDを作成
+    device_key = str(uuid.uuid4())
+    
+    # 1. DeviceLogin パラメータ設定
     dev_url = "https://api.pixelstarships.com/UserService/DeviceLogin"
     dev_params = {
+        "deviceKey": device_key,
         "deviceType": "DeviceTypeAndroid",
         "isTest": "false"
     }
     
     try:
-        # POST送信
-        dev_res = requests.post(dev_url, params=dev_params, headers=HEADERS, timeout=10)
+        # GET リクエストを送信
+        dev_res = requests.get(dev_url, params=dev_params, headers=HEADERS, timeout=10)
         
-        # 404/405 等が出た場合は GET でフォールバック
+        # もし 404 等であれば POST を試行
         if dev_res.status_code != 200:
-            dev_res = requests.get(dev_url, params=dev_params, headers=HEADERS, timeout=10)
+            dev_res = requests.post(dev_url, params=dev_params, headers=HEADERS, timeout=10)
 
         if dev_res.status_code != 200:
-            return None, f"❌ 初期化エラー (HTTP {dev_res.status_code})"
+            return None, f"❌ 初期化エラー (HTTP {dev_res.status_code})\nURL: {dev_res.url}"
 
         dev_root = ET.fromstring(dev_res.content)
         user_login = dev_root.find(".//UserLogin")
         if user_login is None:
-            return None, "❌ 初期化応答の解析に失敗しました"
+            # タグが見つからない場合の直接探索
+            temp_token = dev_root.attrib.get("accessToken")
+        else:
+            temp_token = user_login.attrib.get("accessToken")
 
-        temp_token = user_login.attrib.get("accessToken")
         if not temp_token:
-            return None, "❌ アクセストークンが見つかりません"
+            return None, "❌ 初期アクセストークンの取得に失敗しました"
 
-        # 2. 得られた初期トークンを使って UserEmailPasswordLogin で本ログイン
+        # 2. 本ログイン (UserEmailPasswordLogin)
         auth_url = "https://api.pixelstarships.com/UserService/UserEmailPasswordLogin"
         auth_params = {
             "email": email,
@@ -67,22 +73,20 @@ def login_with_email(email, password):
             "accessToken": temp_token
         }
 
-        auth_res = requests.post(auth_url, params=auth_params, headers=HEADERS, timeout=10)
-        
+        auth_res = requests.get(auth_url, params=auth_params, headers=HEADERS, timeout=10)
         if auth_res.status_code != 200:
-            auth_res = requests.get(auth_url, params=auth_params, headers=HEADERS, timeout=10)
+            auth_res = requests.post(auth_url, params=auth_params, headers=HEADERS, timeout=10)
 
         if auth_res.status_code == 200:
             auth_root = ET.fromstring(auth_res.content)
 
-            # 認証成功時のUserLoginタグから正規トークンを抽出
-            final_user_login = auth_root.find(".//UserLogin")
+            # トークン検索
             final_token = None
+            final_user_login = auth_root.find(".//UserLogin")
             if final_user_login is not None:
                 final_token = final_user_login.attrib.get("accessToken")
 
             if not final_token:
-                # 属性全体から全検索
                 for elem in auth_root.iter():
                     final_token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
                     if final_token:
@@ -91,14 +95,14 @@ def login_with_email(email, password):
             if final_token:
                 return final_token, "✅ ログイン成功！"
 
-            # エラーメッセージ（パスワード間違い等）
+            # エラー判定
             error_msg = auth_root.attrib.get("errorMessage") or "メールアドレスまたはパスワードが正しくありません"
             return None, f"❌ {error_msg}"
         else:
-            return None, f"❌ 本認証エラー (HTTP {auth_res.status_code})"
+            return None, f"❌ 認証エラー (HTTP {auth_res.status_code})"
 
     except Exception as e:
-        return None, f"❌ 通信例外発生: {e}"
+        return None, f"❌ 例外発生: {e}"
 
 
 def fetch_area_a_members(token):
