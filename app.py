@@ -26,45 +26,53 @@ if "pvp_df" not in st.session_state:
 # API通信関数
 # ----------------------------------------------------
 def login_with_email(email, password):
-    """POSTリクエストで公式ログインAPIにアクセスしてトークンを取得"""
-    url = "https://api.pixelstarships.com/UserService/EmailPasswordLogin"
-
-    payload = {
-        "email": email,
-        "password": password,
-        "deviceType": "DeviceTypeAndroid",
-    }
-
+    """【正攻法】DeviceLoginで初期化後、UserEmailPasswordLoginで正規ログイン"""
+    # 1. DeviceLogin でベーストークンを取得
+    device_url = "https://api.pixelstarships.com/UserService/DeviceLogin11?deviceType=DeviceTypeAndroid"
     try:
-        # POST リクエストで送信
-        res = requests.post(url, data=payload, headers=HEADERS, timeout=10)
+        dev_res = requests.post(device_url, headers=HEADERS, timeout=10)
+        if dev_res.status_code != 200:
+            return None, f"❌ 初期化通信エラー: HTTP {dev_res.status_code}"
 
-        # 404の場合はGETでの送信もフォールバック試行
-        if res.status_code == 404:
-            res = requests.get(url, params=payload, headers=HEADERS, timeout=10)
+        dev_root = ET.fromstring(dev_res.content)
+        user_login = dev_root.find(".//UserLogin")
+        if user_login is None:
+            return None, "❌ 初期トークンの取得に失敗しました"
 
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
+        temp_token = user_login.attrib.get("accessToken")
+        if not temp_token:
+            return None, "❌ 初期アクセストークンが見つかりません"
 
-            # XML全体から accessToken 属性を検索
-            token = None
-            for elem in root.iter():
-                token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
-                if token:
+        # 2. 初期トークンを使って正規ログイン認証を行う
+        auth_url = f"https://api.pixelstarships.com/UserService/UserEmailPasswordLogin?email={email}&password={password}&accessToken={temp_token}"
+        auth_res = requests.post(auth_url, headers=HEADERS, timeout=10)
+
+        # GETの場合のフォールバック
+        if auth_res.status_code == 404:
+            auth_res = requests.get(auth_url, headers=HEADERS, timeout=10)
+
+        if auth_res.status_code == 200:
+            auth_root = ET.fromstring(auth_res.content)
+
+            # XMLから正規ユーザーの accessToken を取得
+            final_token = None
+            for elem in auth_root.iter():
+                final_token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
+                if final_token:
                     break
 
-            if token:
-                return token, "✅ ログイン成功！"
+            if final_token:
+                return final_token, "✅ ログイン成功！"
 
-            # 認証エラーメッセージの取得
+            # 認証エラーメッセージの判定
             error_msg = (
-                root.attrib.get("errorMessage")
-                or root.attrib.get("error")
-                or "認証失敗: メールアドレスまたはパスワードをご確認ください"
+                auth_root.attrib.get("errorMessage")
+                or auth_root.attrib.get("error")
+                or "認証失敗: メールアドレスまたはパスワードを確認してください"
             )
             return None, f"❌ {error_msg}"
         else:
-            return None, f"❌ 通信エラー (HTTP {res.status_code})"
+            return None, f"❌ 認証エラー (HTTP {auth_res.status_code})"
 
     except Exception as e:
         return None, f"❌ 例外発生: {e}"
