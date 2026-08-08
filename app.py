@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import asyncio
 import io
+import requests
+import xml.etree.ElementTree as ET
 from pssapi import PssApiClient
 
 st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー分析", layout="wide")
@@ -10,53 +12,78 @@ st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）トーナメント �
 st.caption("上位6艦隊の全所属メンバーデータを個別に取得して表示します。")
 
 # ----------------------------------------------------
-# pssapi を利用した非同期データ取得処理
+# データ取得処理（認証アクセストークン自動取得付き）
 # ----------------------------------------------------
+async def get_pss_access_token(client):
+    """PSSサーバーとデバイス認証を行い、アクセストークンを取得"""
+    try:
+        # デバイスログインを実行してトークンを生成
+        device_login = await client.device_service.device_login_11(
+            checksum="",
+            device_type="DeviceTypeAndroid",
+            language_key="en",
+            advertising_key="",
+            client_date_time=""
+        )
+        return getattr(device_login, 'access_token', None) or getattr(device_login, 'token', None)
+    except Exception as e:
+        # トークン取得エラー時のフォールバック処理
+        return None
+
 async def fetch_area_a_members_async():
     client = PssApiClient()
     
     # 1. 上位6艦隊を取得
     alliances = await client.alliance_service.list_alliances_by_ranking(0, 6)
     
+    # 2. 認証トークンを取得
+    access_token = await get_pss_access_token(client)
+    
     all_members = []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     
     for rank, alliance in enumerate(alliances, 1):
-        alliance_id = getattr(alliance, 'alliance_id', None) or getattr(alliance, 'id', 0)
+        alliance_id = getattr(alliance, 'alliance_id', None) or getattr(alliance, 'id', None)
         alliance_name = getattr(alliance, 'alliance_name', f"艦隊_{alliance_id}")
         
         if not alliance_id:
             continue
             
-        # 2. pssapi 経由で各アライアンスのユーザー一覧を取得（認証自動処理）
-        try:
-            users = await client.user_service.list_users(alliance_id=alliance_id)
+        # 3. アクセストークンを付与して ListUsers API をコール
+        url = f"https://api.pixelstarships.com/AllianceService/ListUsers?allianceId={alliance_id}"
+        if access_token:
+            url += f"&accessToken={access_token}"
             
-            for user in users:
-                all_members.append({
-                    "艦隊順位": rank,
-                    "艦隊名": alliance_name,
-                    "プレイヤー名": getattr(user, 'name', '不明'),
-                    "スター数": getattr(user, 'alliance_score', 0),
-                    "トロフィー": getattr(user, 'trophy', 0),
-                    "役職": str(getattr(user, 'alliance_membership', '-')).replace('AllianceMembership.', ''),
-                    "プレイヤーID": getattr(user, 'id', '-')
-                })
-        except Exception as err:
-            # 別のパラメータ名で再試行
-            try:
-                users = await client.user_service.list_users(alliance_id)
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+                users = root.findall('.//User')
+                if not users:
+                    users = root.findall('.//UserSubquery')
+                if not users:
+                    # XML全体からUser要素を探す
+                    users = [elem for elem in root.iter() if 'name' in {k.lower(): v for k, v in elem.attrib.items()}]
+                
                 for user in users:
+                    attrs = {k.lower(): v for k, v in user.attrib.items()}
+                    name = user.attrib.get('Name') or attrs.get('name') or '不明'
+                    score = attrs.get('alliancescore') or attrs.get('score') or '0'
+                    trophy = attrs.get('trophy') or '0'
+                    membership = attrs.get('alliancemembership') or attrs.get('role') or '-'
+                    user_id = attrs.get('id') or attrs.get('userid') or '-'
+                    
                     all_members.append({
                         "艦隊順位": rank,
                         "艦隊名": alliance_name,
-                        "プレイヤー名": getattr(user, 'name', '不明'),
-                        "スター数": getattr(user, 'alliance_score', 0),
-                        "トロフィー": getattr(user, 'trophy', 0),
-                        "役職": str(getattr(user, 'alliance_membership', '-')).replace('AllianceMembership.', ''),
-                        "プレイヤーID": getattr(user, 'id', '-')
+                        "プレイヤー名": name,
+                        "スター数": int(score) if str(score).isdigit() else 0,
+                        "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
+                        "役職": membership,
+                        "プレイヤーID": user_id
                     })
-            except Exception as inner_err:
-                st.warning(f"「{alliance_name}」のメンバー取得スキップ: {inner_err}")
+        except Exception as err:
+            st.warning(f"「{alliance_name}」の取得でエラー: {err}")
             
     return pd.DataFrame(all_members)
 
@@ -72,7 +99,7 @@ if "area_a_df" not in st.session_state:
 col1, col2 = st.columns([1, 3])
 with col1:
     if st.button("🚀 エリアA（上位6艦隊）の最新データを取得", type="primary"):
-        with st.spinner("公式サーバーから上位6艦隊の全メンバーデータを取得中...（約5秒）"):
+        with st.spinner("公式サーバーと通信・認証を行ってデータを取得中..."):
             try:
                 df_result = asyncio.run(fetch_area_a_members_async())
                 st.session_state.area_a_df = df_result
