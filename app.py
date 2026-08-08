@@ -1,230 +1,241 @@
-import streamlit as st
-import pandas as pd
 import io
-import requests
 import xml.etree.ElementTree as ET
+import pandas as pd
+import requests
+import streamlit as st
 
-st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー分析", layout="wide")
+st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー＆PVP分析", layout="wide")
 
-st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）トーナメント エリアA 分析")
-st.caption("上位6艦隊の全所属メンバーデータを個別に取得して表示します。")
+st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）エリアA & 対戦分析")
+st.caption("PSS公式APIと連携して、メンバーデータおよびPVP対戦ログを取得・分析します。")
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-}
+HEADERS = {"User-Agent": "PixelStarships/1.0"}
 
-def get_guest_access_token():
-    """PSS公式APIにGETリクエストでアクセスしaccessTokenを取得"""
-    # GET送信用の試行対象エンドポイント一覧
-    endpoints = [
-        "https://api.pixelstarships.com/UserService/DeviceLogin11?deviceType=DeviceTypeAndroid",
-        "https://api.pixelstarships.com/UserService/DeviceLogin8?deviceType=DeviceTypeAndroid",
-        "https://api.pixelstarships.com/UserService/DeviceLogin5?deviceType=DeviceTypeAndroid",
-        "https://api.pixelstarships.com/UserService/DeviceLogin?deviceType=DeviceTypeAndroid"
-    ]
-    
-    last_err = ""
-    for url in endpoints:
-        try:
-            # PSSのAPIは基本的に GET リクエストを受け付けます
-            res = requests.get(url, headers=HEADERS, timeout=8)
-            if res.status_code == 200:
-                root = ET.fromstring(res.content)
-                for elem in root.iter():
-                    token = elem.attrib.get('accessToken') or elem.attrib.get('AccessToken')
-                    if token:
-                        api_name = url.split('/')[-1].split('?')[0]
-                        return token, f"成功 ({api_name})"
-                last_err = f"200 OKですがXML内にaccessTokenなし ({url.split('/')[-1].split('?')[0]})"
-            else:
-                last_err = f"HTTP {res.status_code} ({url.split('/')[-1].split('?')[0]})"
-        except Exception as e:
-            last_err = f"通信例外: {e}"
-            
-    return None, last_err
+# ----------------------------------------------------
+# セッション状態の初期化
+# ----------------------------------------------------
+if "access_token" not in st.session_state:
+    st.session_state.access_token = None
+if "area_a_df" not in st.session_state:
+    st.session_state.area_a_df = pd.DataFrame()
+if "pvp_df" not in st.session_state:
+    st.session_state.pvp_df = pd.DataFrame()
 
-def fetch_area_a_with_debug():
+
+# ----------------------------------------------------
+# API通信関数
+# ----------------------------------------------------
+def login_with_email(email, password):
+    """メールアドレスとパスワードで正規トークンを取得（GET通信）"""
+    url = "https://api.pixelstarships.com/UserService/EmailPasswordLogin"
+    params = {
+        "email": email,
+        "password": password,
+        "deviceType": "DeviceTypeAndroid",
+    }
+    try:
+        # PSSのログインAPIは GET リクエストでパラメータを送信
+        res = requests.get(url, params=params, headers=HEADERS, timeout=10)
+
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+
+            # XML内から UserLogin タグを探す
+            user_login = root.find(".//UserLogin")
+            if user_login is not None:
+                token = user_login.attrib.get("accessToken")
+                if token:
+                    return token, "✅ ログイン成功！"
+
+            # ログイン失敗時（パスワード違い等）のメッセージ取得
+            error_msg = root.attrib.get("errorMessage") or "認証失敗: アカウント情報をご確認ください"
+            return None, f"❌ {error_msg}"
+        else:
+            return None, f"❌ HTTPエラー: {res.status_code}"
+    except Exception as e:
+        return None, f"❌ 通信エラー: {e}"
+
+
+def fetch_area_a_members(token):
+    """上位6艦隊とそのメンバー一覧を取得"""
     logs = []
-    
-    # ----------------------------------------------------
-    # STEP 1: アクセストークン取得
-    # ----------------------------------------------------
-    logs.append("--- 🔑 STEP 1: アクセストークン取得 ---")
-    token, status_msg = get_guest_access_token()
-    
-    if token:
-        logs.append(f"✅ トークン発行成功: {token[:12]}... [{status_msg}]")
-    else:
-        logs.append(f"❌ トークン発行失敗: {status_msg}")
+    alliances_url = f"https://api.pixelstarships.com/AllianceService/ListAlliancesByRanking?take=6&accessToken={token}"
 
-    # ----------------------------------------------------
-    # STEP 2: 上位6艦隊の取得
-    # ----------------------------------------------------
-    logs.append("\n--- 🏆 STEP 2: 上位6艦隊データ取得 ---")
-    alliances_url = "https://api.pixelstarships.com/AllianceService/ListAlliancesByRanking?take=6"
-    if token:
-        alliances_url += f"&accessToken={token}"
-        
     try:
         a_res = requests.get(alliances_url, headers=HEADERS, timeout=10)
-        logs.append(f"ランキング取得 HTTPステータス: {a_res.status_code}")
-        
         if a_res.status_code != 200:
-            return pd.DataFrame(), logs
-            
+            return pd.DataFrame(), [f"❌ ランキング取得失敗: HTTP {a_res.status_code}"]
+
         a_root = ET.fromstring(a_res.content)
-        
-        alliance_elems = [
-            elem for elem in a_root.iter() 
-            if 'allianceid' in {k.lower(): v for k, v in elem.attrib.items()}
-        ]
-        
         unique_alliances = []
         seen_ids = set()
-        for elem in alliance_elems:
+
+        for elem in a_root.iter():
             attrs = {k.lower(): v for k, v in elem.attrib.items()}
-            a_id = attrs.get('allianceid')
+            a_id = attrs.get("allianceid")
             if a_id and a_id not in seen_ids:
                 seen_ids.add(a_id)
-                a_name = elem.attrib.get('AllianceName') or attrs.get('alliancename') or f"艦隊_{a_id}"
+                a_name = elem.attrib.get("AllianceName") or attrs.get("alliancename") or f"艦隊_{a_id}"
                 unique_alliances.append((a_id, a_name))
-                
-        logs.append(f"✅ 取得された上位艦隊数: {len(unique_alliances)}件")
-        for idx, (a_id, a_name) in enumerate(unique_alliances[:6], 1):
-            logs.append(f"  └ 順位 {idx}: {a_name} (ID: {a_id})")
-            
-    except Exception as e:
-        logs.append(f"❌ ランキング取得例外: {e}")
-        return pd.DataFrame(), logs
 
-    # ----------------------------------------------------
-    # STEP 3: 各艦隊のメンバー情報取得
-    # ----------------------------------------------------
-    logs.append("\n--- 👥 STEP 3: メンバーデータ取得・解析 ---")
-    all_members = []
-    
-    for rank, (alliance_id, alliance_name) in enumerate(unique_alliances[:6], 1):
-        users_url = f"https://api.pixelstarships.com/AllianceService/ListUsers?allianceId={alliance_id}"
-        if token:
-            users_url += f"&accessToken={token}"
-            
-        try:
+        all_members = []
+        for rank, (alliance_id, alliance_name) in enumerate(unique_alliances[:6], 1):
+            users_url = f"https://api.pixelstarships.com/AllianceService/ListUsers?allianceId={alliance_id}&accessToken={token}"
             u_res = requests.get(users_url, headers=HEADERS, timeout=10)
+
             if u_res.status_code == 200:
                 u_root = ET.fromstring(u_res.content)
-                
                 user_elems = [
-                    elem for elem in u_root.iter()
-                    if 'name' in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
+                    elem
+                    for elem in u_root.iter()
+                    if "name" in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
                 ]
-                
+
                 count = 0
                 for u_elem in user_elems:
                     attrs = {k.lower(): v for k, v in u_elem.attrib.items()}
-                    
-                    if 'alliancename' in attrs:
+                    if "alliancename" in attrs:
                         continue
-                        
-                    name = u_elem.attrib.get('Name') or attrs.get('name') or '不明'
-                    score = attrs.get('alliancescore') or attrs.get('score') or '0'
-                    trophy = attrs.get('trophy') or '0'
-                    membership = attrs.get('alliancemembership') or attrs.get('role') or '-'
-                    user_id = attrs.get('id') or attrs.get('userid') or '-'
-                    
-                    all_members.append({
-                        "艦隊順位": rank,
-                        "艦隊名": alliance_name,
-                        "プレイヤー名": name,
-                        "スター数": int(score) if str(score).isdigit() else 0,
-                        "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
-                        "役職": membership,
-                        "プレイヤーID": user_id
-                    })
+
+                    name = u_elem.attrib.get("Name") or attrs.get("name") or "不明"
+                    score = attrs.get("alliancescore") or attrs.get("score") or "0"
+                    trophy = attrs.get("trophy") or "0"
+                    membership = attrs.get("alliancemembership") or attrs.get("role") or "-"
+                    user_id = attrs.get("id") or attrs.get("userid") or "-"
+
+                    all_members.append(
+                        {
+                            "艦隊順位": rank,
+                            "艦隊名": alliance_name,
+                            "プレイヤー名": name,
+                            "スター数": int(score) if str(score).isdigit() else 0,
+                            "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
+                            "役職": membership,
+                            "プレイヤーID": user_id,
+                        }
+                    )
                     count += 1
-                    
                 logs.append(f"✅ 【{alliance_name}】: {count}名 取得完了")
             else:
-                logs.append(f"❌ 【{alliance_name}】: HTTPエラー {u_res.status_code}")
-        except Exception as err:
-            logs.append(f"❌ 【{alliance_name}】: 解析例外 ({err})")
-            
-    return pd.DataFrame(all_members), logs
+                logs.append(f"❌ 【{alliance_name}】: HTTP {u_res.status_code}")
 
-# ----------------------------------------------------
-# 画面操作＆データ読み込み
-# ----------------------------------------------------
-st.markdown("---")
-st.subheader("🔄 データ取得操作")
+        return pd.DataFrame(all_members), logs
+    except Exception as e:
+        return pd.DataFrame(), [f"❌ 例外発生: {e}"]
 
-if "area_a_df" not in st.session_state:
-    st.session_state.area_a_df = pd.DataFrame()
-if "fetch_logs" not in st.session_state:
-    st.session_state.fetch_logs = []
 
-col1, col2 = st.columns([1, 3])
-with col1:
-    if st.button("🚀 エリアA（上位6艦隊）の最新データを取得", type="primary"):
-        with st.spinner("STEP 1〜3 を順次実行中..."):
-            try:
-                df_result, logs = fetch_area_a_with_debug()
-                st.session_state.area_a_df = df_result
-                st.session_state.fetch_logs = logs
-                
-                if not df_result.empty:
-                    st.success("✅ 全ステップ完了！データをロードしました。")
-                else:
-                    st.error("データの取得結果が空でした。以下のデバッグログをご確認ください。")
-            except Exception as e:
-                st.error(f"実行中にエラーが発生しました: {e}")
-
-# デバッグログの表示
-if st.session_state.fetch_logs:
-    with st.expander("🔍 ステップ別デバッグログを確認する", expanded=True):
-        st.code("\n".join(st.session_state.fetch_logs), language="text")
-
-# ----------------------------------------------------
-# データ表示エリア
-# ----------------------------------------------------
-df = st.session_state.area_a_df
-
-if not df.empty:
-    st.markdown("---")
-    st.subheader("📊 エリアA メンバーデータ一覧")
-    
-    fleet_names = list(df['艦隊名'].unique())
-    selected_fleet = st.selectbox("📌 艦隊で絞り込む:", ["すべての艦隊 (全メンバー)"] + fleet_names)
-    
-    if selected_fleet == "すべての艦隊 (全メンバー)":
-        display_df = df
-    else:
-        display_df = df[df['艦隊名'] == selected_fleet]
-        
-    st.info(f"表示中: **{len(display_df)} 名** | 合計スター数: **{display_df['スター数'].sum():,}**")
-    
-    st.dataframe(
-        display_df.sort_values(by=["艦隊順位", "スター数"], ascending=[True, False]),
-        use_container_width=True
-    )
-    
-    st.markdown("---")
-    search_name = st.text_input("🔍 プレイヤー名で直接検索:")
-    if search_name:
-        matched_df = df[df['プレイヤー名'].astype(str).str.contains(search_name, case=False, na=False)]
-        if not matched_df.empty:
-            st.dataframe(matched_df, use_container_width=True)
+def fetch_pvp_logs(token):
+    """PVP（対戦成績）ログの取得"""
+    url = f"https://api.pixelstarships.com/UserService/ListPvpLogs?accessToken={token}"
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            pvp_list = []
+            for log in root.findall(".//PvpLog"):
+                pvp_list.append(
+                    {
+                        "対戦日時": log.attrib.get("Date", "")[:19].replace("T", " "),
+                        "攻撃者": log.attrib.get("AttackerName", "不明"),
+                        "防衛者": log.attrib.get("DefenderName", "不明"),
+                        "獲得スター": log.attrib.get("StarCount", "0"),
+                        "結果タイプ": log.attrib.get("DisasterType", "-"),
+                    }
+                )
+            return pd.DataFrame(pvp_list), f"✅ PVPログ {len(pvp_list)} 件取得完了"
         else:
-            st.warning("指定した名前のプレイヤーは見つかりませんでした。")
+            return pd.DataFrame(), f"❌ PVPログ取得エラー: HTTP {res.status_code}"
+    except Exception as e:
+        return pd.DataFrame(), f"❌ PVPログ通信エラー: {e}"
 
-    st.markdown("---")
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='エリアAメンバー')
-    
-    st.download_button(
-        label="📥 全メンバーデータをExcelでダウンロード",
-        data=output.getvalue(),
-        file_name="PSS_AreaA_Members.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+
+# ----------------------------------------------------
+# サイドバー：アカウント認証エリア
+# ----------------------------------------------------
+st.sidebar.header("🔑 PSS ログイン設定")
+st.sidebar.caption("メンバー詳細やPVPログの取得には正規ログインが必要です。")
+
+email_input = st.sidebar.text_input("メールアドレス")
+password_input = st.sidebar.text_input("パスワード", type="password")
+
+if st.sidebar.button("ログインしてトークン取得"):
+    if email_input and password_input:
+        with st.sidebar.spinner("認証中..."):
+            token, msg = login_with_email(email_input, password_input)
+            if token:
+                st.session_state.access_token = token
+                st.sidebar.success(msg)
+            else:
+                st.sidebar.error(msg)
+    else:
+        st.sidebar.warning("メールアドレスとパスワードを入力してください。")
+
+# トークンの状態表示
+if st.session_state.access_token:
+    st.sidebar.info(f"🔑 トークン保持中: `{st.session_state.access_token[:10]}...`")
 else:
-    st.info("💡 上の「エリアA（上位6艦隊）の最新データを取得」ボタンを押すと、データを読み込みます。")
+    st.sidebar.warning("⚠️ 未ログイン状態です（データが取得できません）。")
+
+
+# ----------------------------------------------------
+# メイン画面：タブ切り替え構成
+# ----------------------------------------------------
+tab1, tab2 = st.tabs(["🏆 エリアA 艦隊・メンバー分析", "⚔️ PVP対戦成績ログ"])
+
+# --- TAB 1: メンバー分析 ---
+with tab1:
+    st.subheader("🔄 エリアA（上位6艦隊）メンバー情報取得")
+
+    if st.button("🚀 メンバーデータを更新・取得", type="primary"):
+        if not st.session_state.access_token:
+            st.error("サイドバーから先にログインを行ってください。")
+        else:
+            with st.spinner("上位6艦隊と所属メンバーデータを取得中..."):
+                df_res, logs = fetch_area_a_members(st.session_state.access_token)
+                st.session_state.area_a_df = df_res
+                st.write("\n".join(logs))
+
+    df_m = st.session_state.area_a_df
+    if not df_m.empty:
+        st.markdown("---")
+        fleet_names = list(df_m["艦隊名"].unique())
+        selected_fleet = st.selectbox("📌 艦隊で絞り込む:", ["すべての艦隊 (全メンバー)"] + fleet_names)
+
+        display_df = df_m if selected_fleet == "すべての艦隊 (全メンバー)" else df_m[df_m["艦隊名"] == selected_fleet]
+        st.info(f"表示中: **{len(display_df)} 名** | 合計スター数: **{display_df['スター数'].sum():,}**")
+
+        st.dataframe(
+            display_df.sort_values(by=["艦隊順位", "スター数"], ascending=[True, False]),
+            use_container_width=True,
+        )
+
+        # Excelダウンロード
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_m.to_excel(writer, index=False, sheet_name="エリアAメンバー")
+        st.download_button(
+            label="📥 全メンバーデータをExcelでダウンロード",
+            data=output.getvalue(),
+            file_name="PSS_AreaA_Members.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+# --- TAB 2: PVP対戦ログ ---
+with tab2:
+    st.subheader("⚔️ 直近のPVP対戦成績取得")
+
+    if st.button("🔄 PVPログを取得"):
+        if not st.session_state.access_token:
+            st.error("サイドバーから先にログインを行ってください。")
+        else:
+            with st.spinner("PVPログを取得中..."):
+                pvp_res, pvp_msg = fetch_pvp_logs(st.session_state.access_token)
+                st.session_state.pvp_df = pvp_res
+                if not pvp_res.empty:
+                    st.success(pvp_msg)
+                else:
+                    st.warning(pvp_msg)
+
+    df_pvp = st.session_state.pvp_df
+    if not df_pvp.empty:
+        st.dataframe(df_pvp, use_container_width=True)
