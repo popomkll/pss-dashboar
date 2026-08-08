@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import requests
 import xml.etree.ElementTree as ET
+import re
 
 st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー分析", layout="wide")
 
@@ -13,42 +14,53 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
-def get_access_token_direct():
-    """PSS公式APIエンドポイントへ直接リクエストしてaccessTokenを取得"""
-    # 複数端末型のエンドポイントを順番に試行
-    endpoints = [
-        "https://api.pixelstarships.com/UserService/DeviceLogin11?deviceType=DeviceTypeAndroid",
-        "https://api.pixelstarships.com/UserService/DeviceLogin?deviceType=DeviceTypeAndroid",
-        "https://api.pixelstarships.com/SettingService/GetLatestVersion3?deviceType=DeviceTypeAndroid"
+def get_access_token_robust():
+    """PSS公式APIへ正しいパラメータ構成でリクエストしてaccessTokenを取得"""
+    # 端末ID相当の固定キー
+    device_key = "a1b2c3d4e5f67890a1b2c3d4e5f67890"
+    
+    urls = [
+        f"https://api.pixelstarships.com/UserService/DeviceLogin3?deviceType=DeviceTypeAndroid&deviceKey={device_key}&isForced=True",
+        f"https://api.pixelstarships.com/UserService/DeviceLogin11?deviceType=DeviceTypeAndroid&deviceKey={device_key}",
+        f"https://api.pixelstarships.com/UserService/DeviceLogin?deviceType=DeviceTypeAndroid&checksum="
     ]
     
-    for url in endpoints:
+    for url in urls:
         try:
             res = requests.post(url, headers=HEADERS, timeout=8)
-            if res.status_code == 200 and 'accessToken' in res.text:
-                root = ET.fromstring(res.content)
-                for elem in root.iter():
-                    token = elem.attrib.get('accessToken') or elem.attrib.get('token')
-                    if token:
-                        return token, f"成功 ({url.split('/')[-1]})"
+            if res.status_code == 200:
+                # 1. XML要素から抽出
+                try:
+                    root = ET.fromstring(res.content)
+                    for elem in root.iter():
+                        token = elem.attrib.get('accessToken') or elem.attrib.get('token')
+                        if token:
+                            return token, f"成功 ({url.split('/')[-1].split('?')[0]})"
+                except Exception:
+                    pass
+                
+                # 2. テキスト全体から正規表現で抽出
+                match = re.search(r'accessToken="([^"]+)"', res.text, re.I) or re.search(r'token="([^"]+)"', res.text, re.I)
+                if match:
+                    return match.group(1), f"正規表現成功 ({url.split('/')[-1].split('?')[0]})"
         except Exception:
             continue
             
-    return None, "すべてのログインURLでトークン検出失敗"
+    return None, "トークン発行失敗"
 
 def fetch_area_a_with_debug():
     logs = []
     
     # ----------------------------------------------------
-    # STEP 1: 直接HTTPリクエストによるアクセストークン取得
+    # STEP 1: トークン取得
     # ----------------------------------------------------
     logs.append("--- 🔑 STEP 1: アクセストークン取得 ---")
-    token, status_msg = get_access_token_direct()
+    token, status_msg = get_access_token_robust()
     
     if token:
         logs.append(f"✅ トークン発行成功: {token[:12]}... [{status_msg}]")
     else:
-        logs.append(f"⚠️ トークン取得失敗: {status_msg} (認証なしで進行します)")
+        logs.append(f"⚠️ トークン取得失敗: {status_msg}")
 
     # ----------------------------------------------------
     # STEP 2: 上位6艦隊の取得
@@ -104,38 +116,61 @@ def fetch_area_a_with_debug():
         try:
             u_res = requests.get(users_url, headers=HEADERS, timeout=10)
             if u_res.status_code == 200:
-                u_root = ET.fromstring(u_res.content)
-                
-                # 属性に 'name' を持つ全ユーザー要素を抽出
-                user_elems = [
-                    elem for elem in u_root.iter()
-                    if 'name' in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
-                ]
-                
+                # XML構文解析
+                try:
+                    u_root = ET.fromstring(u_res.content)
+                    user_elems = [
+                        elem for elem in u_root.iter()
+                        if 'name' in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
+                    ]
+                except Exception:
+                    user_elems = []
+
                 count = 0
-                for u_elem in user_elems:
-                    attrs = {k.lower(): v for k, v in u_elem.attrib.items()}
-                    
-                    if 'alliancename' in attrs:
-                        continue
+                if user_elems:
+                    for u_elem in user_elems:
+                        attrs = {k.lower(): v for k, v in u_elem.attrib.items()}
+                        if 'alliancename' in attrs:
+                            continue
+                            
+                        name = u_elem.attrib.get('Name') or attrs.get('name') or '不明'
+                        score = attrs.get('alliancescore') or attrs.get('score') or '0'
+                        trophy = attrs.get('trophy') or '0'
+                        membership = attrs.get('alliancemembership') or attrs.get('role') or '-'
+                        user_id = attrs.get('id') or attrs.get('userid') or '-'
                         
-                    name = u_elem.attrib.get('Name') or attrs.get('name') or '不明'
-                    score = attrs.get('alliancescore') or attrs.get('score') or '0'
-                    trophy = attrs.get('trophy') or '0'
-                    membership = attrs.get('alliancemembership') or attrs.get('role') or '-'
-                    user_id = attrs.get('id') or attrs.get('userid') or '-'
-                    
-                    all_members.append({
-                        "艦隊順位": rank,
-                        "艦隊名": alliance_name,
-                        "プレイヤー名": name,
-                        "スター数": int(score) if str(score).isdigit() else 0,
-                        "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
-                        "役職": membership,
-                        "プレイヤーID": user_id
-                    })
-                    count += 1
-                    
+                        all_members.append({
+                            "艦隊順位": rank,
+                            "艦隊名": alliance_name,
+                            "プレイヤー名": name,
+                            "スター数": int(score) if str(score).isdigit() else 0,
+                            "トロフィー": int(trophy) if str(trophy).isdigit() else 0,
+                            "役職": membership,
+                            "プレイヤーID": user_id
+                        })
+                        count += 1
+                else:
+                    # XMLで取れない場合、正規表現で全ユーザー属性を力づく抽出
+                    user_tags = re.findall(r'<User\s+[^>]+>', u_res.text, re.I)
+                    for u_str in user_tags:
+                        name_m = re.search(r'Name="([^"]+)"', u_str, re.I)
+                        score_m = re.search(r'AllianceScore="([^"]+)"', u_str, re.I) or re.search(r'Score="([^"]+)"', u_str, re.I)
+                        trophy_m = re.search(r'Trophy="([^"]+)"', u_str, re.I)
+                        membership_m = re.search(r'AllianceMembership="([^"]+)"', u_str, re.I)
+                        id_m = re.search(r'Id="([^"]+)"', u_str, re.I)
+                        
+                        if name_m:
+                            all_members.append({
+                                "艦隊順位": rank,
+                                "艦隊名": alliance_name,
+                                "プレイヤー名": name_m.group(1),
+                                "スター数": int(score_m.group(1)) if score_m and score_m.group(1).isdigit() else 0,
+                                "トロフィー": int(trophy_m.group(1)) if trophy_m and trophy_m.group(1).isdigit() else 0,
+                                "役職": membership_m.group(1) if membership_m else "-",
+                                "プレイヤーID": id_m.group(1) if id_m else "-"
+                            })
+                            count += 1
+
                 logs.append(f"✅ 【{alliance_name}】: {count}名 取得完了")
             else:
                 logs.append(f"❌ 【{alliance_name}】: HTTPエラー {u_res.status_code}")
