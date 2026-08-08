@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import requests
+import re
 import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="ピクセル宇宙戦艦 エリアA プレイヤー分析", layout="wide")
@@ -10,32 +11,27 @@ st.title("🚀 ピクセル宇宙戦艦（Pixel Starships）トーナメント �
 st.caption("上位6艦隊の全所属メンバーデータを個別に取得して表示します。")
 
 # ----------------------------------------------------
-# PSS API 直接通信処理（ライブラリ不使用）
+# PSS API 通信 ＆ 強力文字列解析ロジック
 # ----------------------------------------------------
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
 def get_access_token():
-    """デバイスログインを実行してaccessTokenを取得"""
     url = "https://api.pixelstarships.com/DeviceService/DeviceLogin11?deviceType=DeviceTypeAndroid"
     try:
         res = requests.post(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            # Login要素からaccessTokenを取得
-            login_elem = root.find('.//DeviceLogin') or root.find('.//Login') or root
-            token = login_elem.get('accessToken') or login_elem.get('token')
-            return token
-    except Exception as e:
-        st.write(f"トークン取得エラー: {e}")
+            match = re.search(r'accessToken="([^"]+)"', res.text) or re.search(r'token="([^"]+)"', res.text)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
     return None
 
 def fetch_area_a_members():
-    # 1. アクセストークンを取得
     token = get_access_token()
     
-    # 2. 上位艦隊一覧（Rankings）を取得
     alliances_url = "https://api.pixelstarships.com/AllianceService/ListAlliancesByRanking?take=6"
     if token:
         alliances_url += f"&accessToken={token}"
@@ -44,19 +40,18 @@ def fetch_area_a_members():
     if res.status_code != 200:
         return pd.DataFrame(), [f"艦隊ランキング取得失敗: HTTP {res.status_code}"]
         
-    root = ET.fromstring(res.content)
-    alliances = root.findall('.//Alliance')
-    if not alliances:
-        alliances = [elem for elem in root.iter() if 'alliancename' in {k.lower(): v for k, v in elem.attrib.items()}]
-        
+    # 正規表現で Alliance タグ情報を直接抽出
+    alliance_matches = re.findall(r'<Alliance[^>]+>', res.text)
+    
     all_members = []
     logs = []
     
-    # 3. 各艦隊のメンバーを取得
-    for rank, alliance in enumerate(alliances[:6], 1):
-        attrs = {k.lower(): v for k, v in alliance.attrib.items()}
-        alliance_id = attrs.get('allianceid') or attrs.get('id')
-        alliance_name = alliance.attrib.get('AllianceName') or attrs.get('alliancename') or f"艦隊_{alliance_id}"
+    for rank, a_str in enumerate(alliance_matches[:6], 1):
+        a_id_m = re.search(r'AllianceId="([^"]+)"', a_str, re.I) or re.search(r'Id="([^"]+)"', a_str, re.I)
+        a_name_m = re.search(r'AllianceName="([^"]+)"', a_str, re.I) or re.search(r'Name="([^"]+)"', a_str, re.I)
+        
+        alliance_id = a_id_m.group(1) if a_id_m else None
+        alliance_name = a_name_m.group(1) if a_name_m else f"艦隊_{alliance_id}"
         
         if not alliance_id:
             continue
@@ -68,18 +63,29 @@ def fetch_area_a_members():
         try:
             u_res = requests.get(users_url, headers=HEADERS, timeout=10)
             if u_res.status_code == 200:
-                u_root = ET.fromstring(u_res.content)
-                users = u_root.findall('.//User')
-                if not users:
-                    users = [elem for elem in u_root.iter() if 'name' in {k.lower(): v for k, v in elem.attrib.items()}]
+                # User情報を正規表現で一括取得（タグ名不問）
+                user_matches = re.findall(r'<[a-zA-Z0-9]+[^>]+Name="[^"]+"[^>]*>', u_res.text)
+                if not user_matches:
+                    # 小文字の場合の検索パターン
+                    user_matches = re.findall(r'<[a-zA-Z0-9]+[^>]+name="[^"]+"[^>]*>', u_res.text)
+                
+                count = 0
+                for u_str in user_matches:
+                    # アライアンス自体のタグを誤検知した場合はスキップ
+                    if '<Alliance' in u_str:
+                        continue
+                        
+                    name_m = re.search(r'Name="([^"]+)"', u_str, re.I)
+                    score_m = re.search(r'AllianceScore="([^"]+)"', u_str, re.I) or re.search(r'Score="([^"]+)"', u_str, re.I)
+                    trophy_m = re.search(r'Trophy="([^"]+)"', u_str, re.I)
+                    membership_m = re.search(r'AllianceMembership="([^"]+)"', u_str, re.I) or re.search(r'Role="([^"]+)"', u_str, re.I)
+                    id_m = re.search(r'Id="([^"]+)"', u_str, re.I) or re.search(r'UserId="([^"]+)"', u_str, re.I)
                     
-                for user in users:
-                    u_attrs = {k.lower(): v for k, v in user.attrib.items()}
-                    name = user.attrib.get('Name') or u_attrs.get('name') or '不明'
-                    score = u_attrs.get('alliancescore') or u_attrs.get('score') or '0'
-                    trophy = u_attrs.get('trophy') or '0'
-                    membership = u_attrs.get('alliancemembership') or u_attrs.get('role') or '-'
-                    user_id = u_attrs.get('id') or u_attrs.get('userid') or '-'
+                    name = name_m.group(1) if name_m else "不明"
+                    score = score_m.group(1) if score_m else "0"
+                    trophy = trophy_m.group(1) if trophy_m else "0"
+                    membership = membership_m.group(1) if membership_m else "-"
+                    user_id = id_m.group(1) if id_m else "-"
                     
                     all_members.append({
                         "艦隊順位": rank,
@@ -90,7 +96,9 @@ def fetch_area_a_members():
                         "役職": membership,
                         "プレイヤーID": user_id
                     })
-                logs.append(f"✅ {alliance_name}: {len(users)}名 取得成功")
+                    count += 1
+                    
+                logs.append(f"✅ {alliance_name}: {count}名 取得成功")
             else:
                 logs.append(f"❌ {alliance_name}: HTTP {u_res.status_code}")
         except Exception as err:
@@ -112,7 +120,7 @@ if "fetch_logs" not in st.session_state:
 col1, col2 = st.columns([1, 3])
 with col1:
     if st.button("🚀 エリアA（上位6艦隊）の最新データを取得", type="primary"):
-        with st.spinner("PSS公式サーバーからデータを直接取得中...（約3〜5秒）"):
+        with st.spinner("PSS公式サーバーからデータを解析・抽出中...（約3〜5秒）"):
             try:
                 df_result, logs = fetch_area_a_members()
                 st.session_state.area_a_df = df_result
@@ -121,7 +129,7 @@ with col1:
                 if not df_result.empty:
                     st.success("✅ データ取得が完了しました！")
                 else:
-                    st.error("データの取得結果が空でした。通信ログをご確認ください。")
+                    st.error("データの取得結果が空でした。詳細ログをご確認ください。")
             except Exception as e:
                 st.error(f"実行中にエラーが発生しました: {e}")
 
