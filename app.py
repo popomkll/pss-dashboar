@@ -26,7 +26,7 @@ if "pvp_df" not in st.session_state:
 
 
 # ----------------------------------------------------
-# API通信関数（api2 / api の両対応フォールバック）
+# API通信関数
 # ----------------------------------------------------
 def fetch_api_data(endpoint_path, token):
     """api2.pixelstarships.com を優先し、ダメなら api.pixelstarships.com を試す"""
@@ -130,16 +130,14 @@ def fetch_pvp_logs(token):
 
 
 # ----------------------------------------------------
-# サイドバー：トークン設定エリア
+# サイドバー：トークン設定＆全自動リンク生成
 # ----------------------------------------------------
 st.sidebar.header("🔑 PSS アクセストークン設定")
-st.sidebar.caption("API通信用のアクセストークンを入力してください。")
 
 token_input = st.sidebar.text_input(
     "AccessToken（アクセストークン）",
     value=st.session_state.access_token,
-    type="password",
-    help="PSSのアクセストークン文字列を直接貼り付けます。"
+    type="password"
 )
 
 if token_input:
@@ -151,13 +149,24 @@ else:
     st.sidebar.warning("⚠️ トークン未設定です")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("💡 トークンの取得方法")
-st.sidebar.markdown("""
-以下の手順でトークンを簡単に取得できます：
-1. **ブラウザで直接ログインURLを開く**
-2. 画面に表示されるXMLの中から `accessToken="xxxx..."` の部分をコピー
-3. 上の入力欄に貼り付け
-""")
+st.sidebar.subheader("🛠️ 確実なトークン取得手順")
+
+st.sidebar.markdown("**ステップ1: 初期化リンク**")
+st.sidebar.markdown("[👉 ① ここをクリックして端末初期化](https://api2.pixelstarships.com/UserService/DeviceLogin15?deviceType=DeviceTypeAndroid)")
+st.sidebar.caption("※開いた画面にある `accessToken=\"...\"` の値をコピーしてください。")
+
+temp_tok = st.sidebar.text_input("①の accessToken を貼り付け", type="password")
+
+if temp_tok:
+    st.sidebar.markdown("**ステップ2: 本ログイン**")
+    user_email = st.sidebar.text_input("メールアドレス", value="popomklv@gmail.com")
+    user_pass = st.sidebar.text_input("パスワード", type="password")
+    
+    if user_email and user_pass:
+        final_login_url = f"https://api2.pixelstarships.com/UserService/UserEmailPasswordAuthorize?email={user_email}&password={user_pass}&accessToken={temp_tok.strip()}"
+        st.sidebar.markdown(f"[👉 ② ここをクリックして本トークンを表示]({final_login_url})")
+        st.sidebar.info("※表示された画面の `accessToken=\"...\"` が本トークンです！一番上の入力欄に貼り付けてください。")
+
 
 # ----------------------------------------------------
 # メイン画面：タブ切り替え構成
