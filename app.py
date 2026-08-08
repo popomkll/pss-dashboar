@@ -26,56 +26,94 @@ if "pvp_df" not in st.session_state:
 # API通信関数
 # ----------------------------------------------------
 def login_with_email(email, password):
-    """【正攻法】DeviceLoginで初期化後、UserEmailPasswordLoginで正規ログイン"""
-    # 1. DeviceLogin でベーストークンを取得
-    device_url = "https://api.pixelstarships.com/UserService/DeviceLogin11?deviceType=DeviceTypeAndroid"
-    try:
-        dev_res = requests.post(device_url, headers=HEADERS, timeout=10)
-        if dev_res.status_code != 200:
-            return None, f"❌ 初期化通信エラー: HTTP {dev_res.status_code}"
+    """複数バージョンのDeviceLoginおよびUserEmailPasswordLoginを自動試行してトークン取得"""
 
-        dev_root = ET.fromstring(dev_res.content)
-        user_login = dev_root.find(".//UserLogin")
-        if user_login is None:
-            return None, "❌ 初期トークンの取得に失敗しました"
+    # 1. 端末初期化用エンドポイント候補（GET送信）
+    device_endpoints = [
+        "https://api.pixelstarships.com/UserService/DeviceLogin",
+        "https://api.pixelstarships.com/UserService/DeviceLogin11",
+        "https://api.pixelstarships.com/UserService/DeviceLogin12",
+        "https://api.pixelstarships.com/UserService/DeviceLogin13",
+        "https://api.pixelstarships.com/UserService/DeviceLogin14",
+        "https://api.pixelstarships.com/UserService/DeviceLogin15",
+    ]
 
-        temp_token = user_login.attrib.get("accessToken")
-        if not temp_token:
-            return None, "❌ 初期アクセストークンが見つかりません"
+    temp_token = None
+    dev_err = ""
 
-        # 2. 初期トークンを使って正規ログイン認証を行う
-        auth_url = f"https://api.pixelstarships.com/UserService/UserEmailPasswordLogin?email={email}&password={password}&accessToken={temp_token}"
-        auth_res = requests.post(auth_url, headers=HEADERS, timeout=10)
-
-        # GETの場合のフォールバック
-        if auth_res.status_code == 404:
-            auth_res = requests.get(auth_url, headers=HEADERS, timeout=10)
-
-        if auth_res.status_code == 200:
-            auth_root = ET.fromstring(auth_res.content)
-
-            # XMLから正規ユーザーの accessToken を取得
-            final_token = None
-            for elem in auth_root.iter():
-                final_token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
-                if final_token:
-                    break
-
-            if final_token:
-                return final_token, "✅ ログイン成功！"
-
-            # 認証エラーメッセージの判定
-            error_msg = (
-                auth_root.attrib.get("errorMessage")
-                or auth_root.attrib.get("error")
-                or "認証失敗: メールアドレスまたはパスワードを確認してください"
+    for dev_url in device_endpoints:
+        try:
+            # PSSのDeviceLoginは GET リクエストで処理
+            res = requests.get(
+                dev_url,
+                params={"deviceType": "DeviceTypeAndroid"},
+                headers=HEADERS,
+                timeout=10,
             )
-            return None, f"❌ {error_msg}"
-        else:
-            return None, f"❌ 認証エラー (HTTP {auth_res.status_code})"
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+                user_login = root.find(".//UserLogin")
+                if user_login is not None:
+                    temp_token = user_login.attrib.get("accessToken")
+                    if temp_token:
+                        break
+            else:
+                dev_err = f"HTTP {res.status_code}"
+        except Exception as e:
+            dev_err = str(e)
 
-    except Exception as e:
-        return None, f"❌ 例外発生: {e}"
+    if not temp_token:
+        return None, f"❌ 初期化失敗: {dev_err or 'トークン取得不能'}"
+
+    # 2. メールアドレス・パスワード認証用エンドポイント候補
+    auth_endpoints = [
+        "https://api.pixelstarships.com/UserService/UserEmailPasswordLogin",
+        "https://api.pixelstarships.com/UserService/UserEmailPasswordAuthorize",
+        "https://api.pixelstarships.com/UserService/EmailPasswordLogin",
+    ]
+
+    auth_err = ""
+
+    for auth_url in auth_endpoints:
+        params = {
+            "email": email,
+            "password": password,
+            "accessToken": temp_token,
+        }
+        try:
+            # GET リクエストで送信
+            res = requests.get(auth_url, params=params, headers=HEADERS, timeout=10)
+
+            # GETで404の場合はPOSTも試行
+            if res.status_code == 404:
+                res = requests.post(auth_url, data=params, headers=HEADERS, timeout=10)
+
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+
+                # XML全体から accessToken を全検索
+                final_token = None
+                for elem in root.iter():
+                    final_token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
+                    if final_token:
+                        break
+
+                if final_token:
+                    return final_token, "✅ ログイン成功！"
+
+                # エラーメッセージの抽出
+                error_msg = (
+                    root.attrib.get("errorMessage")
+                    or root.attrib.get("error")
+                    or "認証失敗: メールアドレスまたはパスワードを確認してください"
+                )
+                return None, f"❌ {error_msg}"
+            else:
+                auth_err = f"HTTP {res.status_code}"
+        except Exception as e:
+            auth_err = str(e)
+
+    return None, f"❌ 認証通信エラー: {auth_err}"
 
 
 def fetch_area_a_members(token):
