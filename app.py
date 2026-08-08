@@ -1,5 +1,4 @@
 import io
-import uuid
 import xml.etree.ElementTree as ET
 import pandas as pd
 import requests
@@ -19,7 +18,7 @@ HEADERS = {
 # セッション状態の初期化
 # ----------------------------------------------------
 if "access_token" not in st.session_state:
-    st.session_state.access_token = None
+    st.session_state.access_token = ""
 if "area_a_df" not in st.session_state:
     st.session_state.area_a_df = pd.DataFrame()
 if "pvp_df" not in st.session_state:
@@ -27,95 +26,34 @@ if "pvp_df" not in st.session_state:
 
 
 # ----------------------------------------------------
-# API通信関数
+# API通信関数（api2 / api の両対応フォールバック）
 # ----------------------------------------------------
-def login_with_email(email, password):
-    """端末UUID付きで DeviceLogin を実行後、UserEmailPasswordLogin でトークン取得"""
+def fetch_api_data(endpoint_path, token):
+    """api2.pixelstarships.com を優先し、ダメなら api.pixelstarships.com を試す"""
+    hosts = ["https://api2.pixelstarships.com", "https://api.pixelstarships.com"]
     
-    # ダミーのデバイス識別IDを作成
-    device_key = str(uuid.uuid4())
-    
-    # 1. DeviceLogin パラメータ設定
-    dev_url = "https://api.pixelstarships.com/UserService/DeviceLogin"
-    dev_params = {
-        "deviceKey": device_key,
-        "deviceType": "DeviceTypeAndroid",
-        "isTest": "false"
-    }
-    
-    try:
-        # GET リクエストを送信
-        dev_res = requests.get(dev_url, params=dev_params, headers=HEADERS, timeout=10)
-        
-        # もし 404 等であれば POST を試行
-        if dev_res.status_code != 200:
-            dev_res = requests.post(dev_url, params=dev_params, headers=HEADERS, timeout=10)
-
-        if dev_res.status_code != 200:
-            return None, f"❌ 初期化エラー (HTTP {dev_res.status_code})\nURL: {dev_res.url}"
-
-        dev_root = ET.fromstring(dev_res.content)
-        user_login = dev_root.find(".//UserLogin")
-        if user_login is None:
-            # タグが見つからない場合の直接探索
-            temp_token = dev_root.attrib.get("accessToken")
-        else:
-            temp_token = user_login.attrib.get("accessToken")
-
-        if not temp_token:
-            return None, "❌ 初期アクセストークンの取得に失敗しました"
-
-        # 2. 本ログイン (UserEmailPasswordLogin)
-        auth_url = "https://api.pixelstarships.com/UserService/UserEmailPasswordLogin"
-        auth_params = {
-            "email": email,
-            "password": password,
-            "accessToken": temp_token
-        }
-
-        auth_res = requests.get(auth_url, params=auth_params, headers=HEADERS, timeout=10)
-        if auth_res.status_code != 200:
-            auth_res = requests.post(auth_url, params=auth_params, headers=HEADERS, timeout=10)
-
-        if auth_res.status_code == 200:
-            auth_root = ET.fromstring(auth_res.content)
-
-            # トークン検索
-            final_token = None
-            final_user_login = auth_root.find(".//UserLogin")
-            if final_user_login is not None:
-                final_token = final_user_login.attrib.get("accessToken")
-
-            if not final_token:
-                for elem in auth_root.iter():
-                    final_token = elem.attrib.get("accessToken") or elem.attrib.get("AccessToken")
-                    if final_token:
-                        break
-
-            if final_token:
-                return final_token, "✅ ログイン成功！"
-
-            # エラー判定
-            error_msg = auth_root.attrib.get("errorMessage") or "メールアドレスまたはパスワードが正しくありません"
-            return None, f"❌ {error_msg}"
-        else:
-            return None, f"❌ 認証エラー (HTTP {auth_res.status_code})"
-
-    except Exception as e:
-        return None, f"❌ 例外発生: {e}"
+    for host in hosts:
+        url = f"{host}{endpoint_path}&accessToken={token}"
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=10)
+            if res.status_code == 200:
+                return res.content, None
+        except Exception as e:
+            continue
+            
+    return None, "データ取得に失敗しました。トークンが正しいか、有効期限が切れていないか確認してください。"
 
 
 def fetch_area_a_members(token):
     """上位6艦隊とそのメンバー一覧を取得"""
     logs = []
-    alliances_url = f"https://api.pixelstarships.com/AllianceService/ListAlliancesByRanking?take=6&accessToken={token}"
+    xml_data, err = fetch_api_data("/AllianceService/ListAlliancesByRanking?take=6", token)
+    
+    if err:
+        return pd.DataFrame(), [f"❌ ランキング取得エラー: {err}"]
 
     try:
-        a_res = requests.get(alliances_url, headers=HEADERS, timeout=10)
-        if a_res.status_code != 200:
-            return pd.DataFrame(), [f"❌ ランキング取得失敗: HTTP {a_res.status_code}"]
-
-        a_root = ET.fromstring(a_res.content)
+        a_root = ET.fromstring(xml_data)
         unique_alliances = []
         seen_ids = set()
 
@@ -129,11 +67,10 @@ def fetch_area_a_members(token):
 
         all_members = []
         for rank, (alliance_id, alliance_name) in enumerate(unique_alliances[:6], 1):
-            users_url = f"https://api.pixelstarships.com/AllianceService/ListUsers?allianceId={alliance_id}&accessToken={token}"
-            u_res = requests.get(users_url, headers=HEADERS, timeout=10)
+            u_xml, u_err = fetch_api_data(f"/AllianceService/ListUsers?allianceId={alliance_id}", token)
 
-            if u_res.status_code == 200:
-                u_root = ET.fromstring(u_res.content)
+            if u_xml:
+                u_root = ET.fromstring(u_xml)
                 user_elems = [
                     elem for elem in u_root.iter()
                     if "name" in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
@@ -163,63 +100,64 @@ def fetch_area_a_members(token):
                     count += 1
                 logs.append(f"✅ 【{alliance_name}】: {count}名 取得完了")
             else:
-                logs.append(f"❌ 【{alliance_name}】: HTTP {u_res.status_code}")
+                logs.append(f"❌ 【{alliance_name}】: 取得失敗")
 
         return pd.DataFrame(all_members), logs
     except Exception as e:
-        return pd.DataFrame(), [f"❌ 例外発生: {e}"]
+        return pd.DataFrame(), [f"❌ XML解析例外: {e}"]
 
 
 def fetch_pvp_logs(token):
     """PVP（対戦成績）ログの取得"""
-    url = f"https://api.pixelstarships.com/UserService/ListPvpLogs?accessToken={token}"
+    xml_data, err = fetch_api_data("/UserService/ListPvpLogs?", token)
+    if err:
+        return pd.DataFrame(), f"❌ PVPログ取得エラー: {err}"
+
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            pvp_list = []
-            for log in root.findall(".//PvpLog"):
-                pvp_list.append({
-                    "対戦日時": log.attrib.get("Date", "")[:19].replace("T", " "),
-                    "攻撃者": log.attrib.get("AttackerName", "不明"),
-                    "防衛者": log.attrib.get("DefenderName", "不明"),
-                    "獲得スター": log.attrib.get("StarCount", "0"),
-                    "結果タイプ": log.attrib.get("DisasterType", "-")
-                })
-            return pd.DataFrame(pvp_list), f"✅ PVPログ {len(pvp_list)} 件取得完了"
-        else:
-            return pd.DataFrame(), f"❌ PVPログ取得エラー: HTTP {res.status_code}"
+        root = ET.fromstring(xml_data)
+        pvp_list = []
+        for log in root.findall(".//PvpLog"):
+            pvp_list.append({
+                "対戦日時": log.attrib.get("Date", "")[:19].replace("T", " "),
+                "攻撃者": log.attrib.get("AttackerName", "不明"),
+                "防衛者": log.attrib.get("DefenderName", "不明"),
+                "獲得スター": log.attrib.get("StarCount", "0"),
+                "結果タイプ": log.attrib.get("DisasterType", "-")
+            })
+        return pd.DataFrame(pvp_list), f"✅ PVPログ {len(pvp_list)} 件取得完了"
     except Exception as e:
         return pd.DataFrame(), f"❌ PVPログ通信エラー: {e}"
 
 
 # ----------------------------------------------------
-# サイドバー：アカウント認証エリア
+# サイドバー：トークン設定エリア
 # ----------------------------------------------------
-st.sidebar.header("🔑 PSS ログイン設定")
-st.sidebar.caption("メンバー詳細やPVPログの取得には正規ログインが必要です。")
+st.sidebar.header("🔑 PSS アクセストークン設定")
+st.sidebar.caption("API通信用のアクセストークンを入力してください。")
 
-email_input = st.sidebar.text_input("メールアドレス")
-password_input = st.sidebar.text_input("パスワード", type="password")
+token_input = st.sidebar.text_input(
+    "AccessToken（アクセストークン）",
+    value=st.session_state.access_token,
+    type="password",
+    help="PSSのアクセストークン文字列を直接貼り付けます。"
+)
 
-if st.sidebar.button("ログインしてトークン取得"):
-    if email_input and password_input:
-        with st.sidebar.spinner("認証中..."):
-            token, msg = login_with_email(email_input, password_input)
-            if token:
-                st.session_state.access_token = token
-                st.sidebar.success(msg)
-            else:
-                st.sidebar.error(msg)
-    else:
-        st.sidebar.warning("メールアドレスとパスワードを入力してください。")
+if token_input:
+    st.session_state.access_token = token_input.strip()
 
-# トークンの状態表示
 if st.session_state.access_token:
-    st.sidebar.info(f"🔑 トークン保持中: `{st.session_state.access_token[:10]}...`")
+    st.sidebar.success("🔑 トークンが設定されています")
 else:
-    st.sidebar.warning("⚠️ 未ログイン状態です（データが取得できません）。")
+    st.sidebar.warning("⚠️ トークン未設定です")
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("💡 トークンの取得方法")
+st.sidebar.markdown("""
+以下の手順でトークンを簡単に取得できます：
+1. **ブラウザで直接ログインURLを開く**
+2. 画面に表示されるXMLの中から `accessToken="xxxx..."` の部分をコピー
+3. 上の入力欄に貼り付け
+""")
 
 # ----------------------------------------------------
 # メイン画面：タブ切り替え構成
@@ -232,7 +170,7 @@ with tab1:
 
     if st.button("🚀 メンバーデータを更新・取得", type="primary"):
         if not st.session_state.access_token:
-            st.error("サイドバーから先にログインを行ってください。")
+            st.error("サイドバーにアクセストークンを入力してください。")
         else:
             with st.spinner("上位6艦隊と所属メンバーデータを取得中..."):
                 df_res, logs = fetch_area_a_members(st.session_state.access_token)
@@ -270,7 +208,7 @@ with tab2:
 
     if st.button("🔄 PVPログを取得"):
         if not st.session_state.access_token:
-            st.error("サイドバーから先にログインを行ってください。")
+            st.error("サイドバーにアクセストークンを入力してください。")
         else:
             with st.spinner("PVPログを取得中..."):
                 pvp_res, pvp_msg = fetch_pvp_logs(st.session_state.access_token)
