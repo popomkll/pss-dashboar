@@ -14,31 +14,34 @@ HEADERS = {
 }
 
 def get_guest_access_token():
-    """PSS公式APIにゲストログインを行い、正式なaccessTokenを取得する"""
-    url = "https://api.pixelstarships.com/UserService/DeviceLogin11"
-    params = {
-        'deviceType': 'DeviceTypeAndroid',
-        'advertisingKey': '',
-        'checksum': '',
-        'clientDateTime': '',
-        'languageKey': 'en'
-    }
+    """PSS公式APIにGETリクエストでアクセスしaccessTokenを取得"""
+    # GET送信用の試行対象エンドポイント一覧
+    endpoints = [
+        "https://api.pixelstarships.com/UserService/DeviceLogin11?deviceType=DeviceTypeAndroid",
+        "https://api.pixelstarships.com/UserService/DeviceLogin8?deviceType=DeviceTypeAndroid",
+        "https://api.pixelstarships.com/UserService/DeviceLogin5?deviceType=DeviceTypeAndroid",
+        "https://api.pixelstarships.com/UserService/DeviceLogin?deviceType=DeviceTypeAndroid"
+    ]
     
-    try:
-        # PSSサーバーに対して正式なDeviceLoginを実行
-        res = requests.post(url, params=params, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            # レスポンス内の UserLogin / User 要素から accessToken 属性を全探索
-            for elem in root.iter():
-                token = elem.attrib.get('accessToken') or elem.attrib.get('AccessToken')
-                if token:
-                    return token, "成功"
-            return None, "レスポンスXML内にaccessTokenが見つかりません"
-        else:
-            return None, f"HTTPエラー: {res.status_code}"
-    except Exception as e:
-        return None, f"通信例外: {e}"
+    last_err = ""
+    for url in endpoints:
+        try:
+            # PSSのAPIは基本的に GET リクエストを受け付けます
+            res = requests.get(url, headers=HEADERS, timeout=8)
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+                for elem in root.iter():
+                    token = elem.attrib.get('accessToken') or elem.attrib.get('AccessToken')
+                    if token:
+                        api_name = url.split('/')[-1].split('?')[0]
+                        return token, f"成功 ({api_name})"
+                last_err = f"200 OKですがXML内にaccessTokenなし ({url.split('/')[-1].split('?')[0]})"
+            else:
+                last_err = f"HTTP {res.status_code} ({url.split('/')[-1].split('?')[0]})"
+        except Exception as e:
+            last_err = f"通信例外: {e}"
+            
+    return None, last_err
 
 def fetch_area_a_with_debug():
     logs = []
@@ -50,7 +53,7 @@ def fetch_area_a_with_debug():
     token, status_msg = get_guest_access_token()
     
     if token:
-        logs.append(f"✅ トークン発行成功: {token[:12]}...")
+        logs.append(f"✅ トークン発行成功: {token[:12]}... [{status_msg}]")
     else:
         logs.append(f"❌ トークン発行失敗: {status_msg}")
 
@@ -110,7 +113,6 @@ def fetch_area_a_with_debug():
             if u_res.status_code == 200:
                 u_root = ET.fromstring(u_res.content)
                 
-                # User要素の抽出
                 user_elems = [
                     elem for elem in u_root.iter()
                     if 'name' in {k.lower(): v for k, v in elem.attrib.items()} and elem.tag != u_root.tag
